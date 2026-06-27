@@ -40,8 +40,13 @@ import {
   Cable,
   RadioTower,
   CheckCircle2,
+  Sun,
+  Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from 'lucide-react'
 import { Logo } from './Logo'
+import { useTheme } from '@/lib/theme'
 import { api, type IndexQuote } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { setCurrentTotal as setAlertTotal, useUnreadAlerts } from '@/lib/monitorBadge'
@@ -197,7 +202,7 @@ function TierBadge({ label, hasKey }: { label: string; hasKey?: boolean }) {
           </div>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
-              <span className="text-xs font-medium text-foreground">TickFlow</span>
+              <span className="text-xs font-medium text-foreground">Tide Watch</span>
               <span
                 className="h-1.5 w-1.5 rounded-full"
                 style={{ ...t.dotStyle, ...(base === 'expert' ? { animation: 'pulse 2s infinite' } : {}) }}
@@ -251,6 +256,20 @@ function AIConfigBadge({ configured, model }: { configured?: boolean; model?: st
 }
 
 export function Layout() {
+  const { theme, toggleTheme } = useTheme()
+
+  // 侧边栏折叠状态 (持久化到 localStorage)
+  const [collapsed, setCollapsed] = useState(() => {
+    try { return localStorage.getItem('tickflow-sidebar-collapsed') === '1' } catch { return false }
+  })
+  const toggleCollapsed = () => {
+    setCollapsed(prev => {
+      const next = !prev
+      try { localStorage.setItem('tickflow-sidebar-collapsed', next ? '1' : '0') } catch { /* */ }
+      return next
+    })
+  }
+
   // ===== 共享 hooks (替代内联 useQuery) =====
   const { data: caps } = useCapabilities()
   const { data: settingsState } = useSettings()
@@ -364,175 +383,294 @@ export function Layout() {
   }
 
   return (
-    <div className="h-screen grid grid-cols-[14rem_1fr] bg-base text-foreground overflow-hidden">
-      <aside className="border-r border-border bg-surface flex flex-col h-full min-h-0 overflow-hidden">
-        <div className="px-5 py-5 border-b border-border shrink-0">
-          {/* Brand block — 原创 logo + 等宽 wordmark */}
-          <div className="flex items-center gap-2.5">
-            <Logo
-              size={28}
-              className="shrink-0 drop-shadow-[0_0_8px_rgba(139,92,246,0.5)]"
-              style={{ color: BRAND }}
-            />
-            <div
-              className="font-mono font-bold text-[13px] tracking-[0.06em] text-foreground leading-tight"
-              style={{ textShadow: `0 0 10px ${BRAND}44` }}
-            >
-              <div>TickFlow</div>
-              <div>Stock Panel</div>
-            </div>
-          </div>
-
-          <div className="mt-2.5 text-[10px] uppercase tracking-[0.22em] text-secondary">
-            Quant · Terminal
-          </div>
-
-          <div
-            className="mt-3 h-px"
-            style={{ background: `linear-gradient(90deg, ${BRAND}88, transparent 80%)` }}
-          />
-
-          <TierBadge
-            label={caps?.label ?? ''}
-            hasKey={settingsState?.mode !== 'none'}
-          />
-          <AIConfigBadge
-            configured={settingsState?.has_ai_key}
-            model={settingsState?.ai_model}
-          />
-        </div>
-
-        <nav className="flex-1 min-h-0 overflow-y-auto px-2 py-3 space-y-0.5">
-          {visibleNavItems.map(({ to, label, icon: Icon }) => (
-            <NavLink
-              key={to}
-              to={to}
-              className={({ isActive }) =>
-                cn(
-                  'flex items-center gap-3 px-3 py-2 rounded-btn text-sm transition-colors duration-150 ease-smooth',
-                  isActive
-                    ? 'bg-elevated text-foreground font-medium'
-                    : 'text-foreground/80 hover:bg-elevated hover:text-foreground',
-                )
-              }
-            >
-              {({ isActive }) => (
-                <>
-                  <Icon className="h-4 w-4 shrink-0" />
-                  <span className="flex-1">{label}</span>
-                  {/* 数据同步状态: 同步中转圈, 刚完成显示绿色对勾闪烁 3 秒 */}
-                  {to === '/data' && isDataSyncing && (
-                    <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
-                  )}
-                  {to === '/data' && !isDataSyncing && dataSyncJustDone && (
-                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-bull animate-pulse" />
-                  )}
-                  {/* 监控中心徽标: 仅非监控页且有未读时显示 */}
-                  {to === '/monitor' && <MonitorBadge active={isActive} />}
-                </>
-              )}
-            </NavLink>
-          ))}
-        </nav>
-
-        {/* 全局行情开关 */}
-        <div className="border-t border-border px-3 py-2.5 shrink-0">
-          {isFreeTier ? (
-            /* Free 档位 — 显示升级提示 */
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-secondary truncate">实时行情</span>
-              <span className="text-[10px] text-accent/70 font-medium bg-accent/10 px-1.5 py-0.5 rounded">
-                需 Starter+
-              </span>
-            </div>
-          ) : (
-            /* Starter+ — 开关 + 跳转设置 */
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 min-w-0">
-                <span className={`inline-block h-1.5 w-1.5 rounded-full shrink-0 ${
-                  realtimeEnabled && isRunning && isTrading
-                    ? 'bg-accent animate-pulse'
-                    : realtimeEnabled
-                      ? 'bg-warning/60'
-                      : 'bg-muted'
-                }`} />
-                <span className="text-xs text-secondary truncate">
-                  实时行情
-                </span>
-                <button
-                  onClick={() => navigate('/settings?tab=monitoring')}
-                  className="text-secondary hover:text-foreground transition-colors shrink-0"
-                  title="实时监控设置"
-                >
-                  <Timer className="h-3 w-3" />
-                </button>
-              </div>
+    <div className="h-screen flex flex-col bg-base text-foreground overflow-hidden">
+      {/* ===== 顶部指数行情栏 ===== */}
+      <header className="h-10 shrink-0 border-b border-border bg-surface/80 backdrop-blur-sm flex items-center gap-1 px-4 overflow-x-auto">
+        <span className="text-[10px] text-muted font-medium mr-1 shrink-0">行情</span>
+        {sidebarIndexQuotes?.rows
+          ?.filter(q => CORE_INDEXES.some(ci => ci.symbol === q.symbol))
+          .map((q) => {
+            const name = CORE_INDEXES.find(ci => ci.symbol === q.symbol)?.name ?? q.symbol
+            const value = q.last_price ?? q.close
+            const pct = q.change_pct
+            return (
               <button
-                onClick={() => handleToggle(!realtimeEnabled)}
-                disabled={toggleQuote.isPending}
-                className={`relative inline-flex h-4 w-7 items-center rounded-full shrink-0 transition-colors duration-200 ${
-                  realtimeEnabled
-                    ? 'bg-accent shadow-[0_0_6px_rgba(59,130,246,0.3)]'
-                    : 'bg-elevated'
-                } ${toggleQuote.isPending ? 'opacity-50' : 'cursor-pointer'}`}
+                key={q.symbol}
+                onClick={() => navigate(`/indices?symbol=${encodeURIComponent(q.symbol)}`)}
+                className="flex items-center gap-2 px-2.5 py-1 rounded hover:bg-elevated transition-colors shrink-0"
               >
-                <span className={`inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform duration-200 ${
-                  realtimeEnabled ? 'translate-x-[14px]' : 'translate-x-0.5'
-                }`} />
+                <span className="text-[10px] font-medium text-secondary whitespace-nowrap">{name}</span>
+                <span className="num text-[11px] tabular text-foreground">{fmtIndexValue(value)}</span>
+                <span className={`num text-[10px] tabular font-medium ${indexPctClass(pct)}`}>
+                  {fmtIndexPct(pct)}
+                </span>
               </button>
-            </div>
-          )}
-
-          {/* 状态提示 */}
-          {realtimeEnabled && !isFreeTier && (
-            <div className="mt-1.5 text-[10px] leading-snug">
-              {isRunning && isTrading ? (
-                <span className="text-accent">行情运行中</span>
-              ) : realtimeEnabled && !isTrading ? (
-                <span className="text-warning/70">非交易时段，将在交易时间自动开启</span>
-              ) : null}
-            </div>
-          )}
-          {showSidebarQuotes && !isFreeTier && (
-            <SidebarIndexQuotes rows={sidebarIndexQuotes?.rows} items={sidebarIndexes} />
-          )}
-        </div>
-
-        <div className="border-t border-border px-2 py-3 space-y-0.5 shrink-0">
-          <NavLink
-            to="/settings"
-            className={({ isActive }) =>
-              cn(
-                'flex items-center justify-between gap-3 px-3 py-2 rounded-btn text-sm transition-colors duration-150 ease-smooth',
-                isActive
-                  ? 'bg-elevated text-foreground font-medium'
-                  : 'text-foreground/80 hover:bg-elevated hover:text-foreground',
-              )
-            }
-          >
-            <span className="flex items-center gap-3">
-              <Settings className="h-4 w-4 shrink-0" />
-              <span>设置</span>
+            )
+          })}
+        <div className="flex-1" />
+        {/* 实时行情指示灯 */}
+        {!isFreeTier && (
+          <div className="flex items-center gap-1.5 shrink-0">
+            <span className={`inline-block h-1.5 w-1.5 rounded-full ${
+              realtimeEnabled && isRunning && isTrading
+                ? 'bg-bull animate-pulse'
+                : realtimeEnabled
+                  ? 'bg-warning/60'
+                  : 'bg-muted'
+            }`} />
+            <span className="text-[10px] text-muted whitespace-nowrap">
+              {realtimeEnabled ? '实时' : '延时'}
             </span>
-            <span className="font-mono text-[10px] text-muted/50 select-none">
-              {version ?? ''}
-            </span>
-          </NavLink>
-        </div>
-      </aside>
+          </div>
+        )}
+      </header>
 
-      <motion.main
-        initial={{ opacity: 0, y: 8 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
-        className="h-full overflow-auto scrollbar-gutter-stable"
+      {/* ===== 主体: 侧边栏 + 内容区 ===== */}
+      <div
+        className="flex-1 grid overflow-hidden transition-[grid-template-columns] duration-300 ease-smooth"
+        style={{ gridTemplateColumns: collapsed ? '3.5rem 1fr' : '14rem 1fr' }}
       >
-        <Outlet />
-      </motion.main>
-      <ToastContainer />
-      <AlertToastContainer />
-      <AiAnalysisHost />
-      <AiReportBubble />
+        <aside className="border-r border-border bg-surface flex flex-col h-full min-h-0 overflow-hidden">
+          {/* 折叠模式: 仅显示 Logo + 图标导航 */}
+          {collapsed ? (
+            <>
+              <div className="px-2 py-3 shrink-0 flex flex-col items-center gap-2">
+                <button
+                  onClick={toggleCollapsed}
+                  className="p-1 rounded hover:bg-elevated transition-colors text-muted hover:text-foreground"
+                  title="展开侧边栏"
+                >
+                  <PanelLeftOpen className="h-3.5 w-3.5" />
+                </button>
+                <Logo
+                  size={24}
+                  className="shrink-0 drop-shadow-[0_0_8px_rgba(139,92,246,0.5)]"
+                  style={{ color: BRAND }}
+                />
+              </div>
+              <nav className="flex-1 min-h-0 overflow-y-auto px-1.5 py-2 space-y-1">
+                {visibleNavItems.map(({ to, label, icon: Icon }) => (
+                  <NavLink
+                    key={to}
+                    to={to}
+                    title={label}
+                    className={({ isActive }) =>
+                      cn(
+                        'flex items-center justify-center h-9 w-9 mx-auto rounded-btn transition-all duration-150 ease-smooth',
+                        isActive
+                          ? 'bg-accent/10 text-accent'
+                          : 'text-secondary hover:bg-elevated hover:text-foreground',
+                      )
+                    }
+                  >
+                    {({ isActive }) => (
+                      <div className="relative inline-flex">
+                        <Icon className={cn('h-4 w-4', isActive && 'text-accent')} />
+                        {to === '/data' && isDataSyncing && (
+                          <Loader2 className="absolute -right-1 -top-1 h-2.5 w-2.5 animate-spin text-accent" />
+                        )}
+                        {to === '/data' && !isDataSyncing && dataSyncJustDone && (
+                          <CheckCircle2 className="absolute -right-1 -top-1 h-2.5 w-2.5 text-bull animate-pulse" />
+                        )}
+                        {to === '/monitor' && <MonitorBadge active={isActive} />}
+                      </div>
+                    )}
+                  </NavLink>
+                ))}
+              </nav>
+              {/* 折叠模式底部: 仅主题 + 设置 */}
+              <div className="border-t border-border px-1.5 py-2 space-y-1.5 shrink-0">
+                <button
+                  onClick={toggleTheme}
+                  className="flex items-center justify-center h-8 w-8 mx-auto rounded-btn text-secondary hover:bg-elevated hover:text-foreground transition-colors"
+                  title={theme === 'dark' ? '切换浅色' : '切换深色'}
+                >
+                  {theme === 'dark' ? (
+                    <Sun className="h-4 w-4" />
+                  ) : (
+                    <Moon className="h-4 w-4" />
+                  )}
+                </button>
+                <NavLink
+                  to="/settings"
+                  title="设置"
+                  className={({ isActive }) =>
+                    cn(
+                      'flex items-center justify-center h-8 w-8 mx-auto rounded-btn transition-colors',
+                      isActive ? 'bg-accent/10 text-accent' : 'text-secondary hover:bg-elevated hover:text-foreground',
+                    )
+                  }
+                >
+                  <Settings className="h-4 w-4" />
+                </NavLink>
+              </div>
+            </>
+          ) : (
+            <>
+              {/* 展开模式: Brand 区域 */}
+              <div className="px-5 py-4 shrink-0">
+                <div className="flex items-center gap-2.5">
+                  <Logo
+                    size={28}
+                    className="shrink-0 drop-shadow-[0_0_8px_rgba(139,92,246,0.5)]"
+                    style={{ color: BRAND }}
+                  />
+                  <div
+                    className="font-mono font-bold text-[13px] tracking-[0.06em] text-foreground leading-tight"
+                    style={{ textShadow: `0 0 10px ${BRAND}44` }}
+                  >
+                    Tide Watch
+                  </div>
+                  <button
+                    onClick={toggleCollapsed}
+                    className="ml-auto shrink-0 p-1 rounded hover:bg-elevated transition-colors text-muted hover:text-foreground"
+                    title="折叠侧边栏"
+                  >
+                    <PanelLeftClose className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+
+                <div
+                  className="mt-3 h-px"
+                  style={{ background: `linear-gradient(90deg, ${BRAND}88, transparent 80%)` }}
+                />
+
+                <TierBadge
+                  label={caps?.label ?? ''}
+                  hasKey={settingsState?.mode !== 'none'}
+                />
+                <AIConfigBadge
+                  configured={settingsState?.has_ai_key}
+                  model={settingsState?.ai_model}
+                />
+              </div>
+
+              {/* 展开模式: 导航菜单 */}
+              <nav className="flex-1 min-h-0 overflow-y-auto px-2.5 py-2 space-y-0.5">
+                {visibleNavItems.map(({ to, label, icon: Icon }) => (
+                  <NavLink
+                    key={to}
+                    to={to}
+                    className={({ isActive }) =>
+                      cn(
+                        'flex items-center gap-3 px-3 py-2 rounded-btn text-sm transition-all duration-150 ease-smooth',
+                        isActive
+                          ? 'bg-accent/10 text-accent font-medium border-l-[3px] border-accent -ml-[5px] pl-[10px]'
+                          : 'text-secondary hover:bg-elevated hover:text-foreground border-l-[3px] border-transparent -ml-[5px] pl-[10px]',
+                      )
+                    }
+                  >
+                    {({ isActive }) => (
+                      <>
+                        <Icon className={cn('h-4 w-4 shrink-0', isActive && 'text-accent')} />
+                        <span className="flex-1">{label}</span>
+                        {to === '/data' && isDataSyncing && (
+                          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
+                        )}
+                        {to === '/data' && !isDataSyncing && dataSyncJustDone && (
+                          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-bull animate-pulse" />
+                        )}
+                        {to === '/monitor' && <MonitorBadge active={isActive} />}
+                      </>
+                    )}
+                  </NavLink>
+                ))}
+              </nav>
+
+              {/* 展开模式: 底部控件 */}
+              <div className="border-t border-border px-3 py-2.5 space-y-2 shrink-0">
+                {!isFreeTier && (
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="text-[11px] text-secondary">实时行情</span>
+                      <button
+                        onClick={() => navigate('/settings?tab=monitoring')}
+                        className="text-muted hover:text-foreground transition-colors shrink-0"
+                        title="实时监控设置"
+                      >
+                        <Timer className="h-3 w-3" />
+                      </button>
+                    </div>
+                    <button
+                      onClick={() => handleToggle(!realtimeEnabled)}
+                      disabled={toggleQuote.isPending}
+                      className={`relative inline-flex h-4 w-7 items-center rounded-full shrink-0 transition-colors duration-200 ${
+                        realtimeEnabled
+                          ? 'bg-accent shadow-[0_0_6px_rgba(59,130,246,0.3)]'
+                          : 'bg-elevated border border-border'
+                      } ${toggleQuote.isPending ? 'opacity-50' : 'cursor-pointer'}`}
+                    >
+                      <span className={`inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform duration-200 ${
+                        realtimeEnabled ? 'translate-x-[14px]' : 'translate-x-0.5'
+                      }`} />
+                    </button>
+                  </div>
+                )}
+
+                {/* 主题切换 */}
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] text-secondary">
+                    {theme === 'dark' ? '深色' : '浅色'}
+                  </span>
+                  <button
+                    onClick={toggleTheme}
+                    className="relative inline-flex h-5 w-9 items-center rounded-full shrink-0 transition-all duration-300 bg-elevated border border-border hover:border-accent/30"
+                    title={theme === 'dark' ? '切换浅色' : '切换深色'}
+                  >
+                    <span
+                      className={`inline-flex h-4 w-4 items-center justify-center rounded-full shadow-sm transition-all duration-300 ${
+                        theme === 'dark'
+                          ? 'translate-x-[16px] bg-accent text-white'
+                          : 'translate-x-0.5 bg-warning/80 text-white'
+                      }`}
+                    >
+                      {theme === 'dark' ? (
+                        <Moon className="h-2.5 w-2.5" />
+                      ) : (
+                        <Sun className="h-2.5 w-2.5" />
+                      )}
+                    </span>
+                  </button>
+                </div>
+
+                {/* 设置 */}
+                <NavLink
+                  to="/settings"
+                  className={({ isActive }) =>
+                    cn(
+                      'flex items-center justify-between gap-3 px-2 py-1.5 rounded-btn text-sm transition-colors duration-150 ease-smooth',
+                      isActive
+                        ? 'bg-accent/10 text-accent font-medium'
+                        : 'text-secondary hover:text-foreground',
+                    )
+                  }
+                >
+                  <span className="flex items-center gap-2.5">
+                    <Settings className="h-3.5 w-3.5 shrink-0" />
+                    <span>设置</span>
+                  </span>
+                  <span className="font-mono text-[10px] text-muted/50 select-none">
+                    {version ?? ''}
+                  </span>
+                </NavLink>
+              </div>
+            </>
+          )}
+        </aside>
+
+        <motion.main
+          initial={{ opacity: 0, y: 8 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+          className="h-full overflow-auto scrollbar-gutter-stable"
+        >
+          <Outlet />
+        </motion.main>
+        <ToastContainer />
+        <AlertToastContainer />
+        <AiAnalysisHost />
+        <AiReportBubble />
+      </div>
     </div>
   )
 }

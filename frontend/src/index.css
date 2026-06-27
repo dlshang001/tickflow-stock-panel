@@ -7,30 +7,30 @@
  * HSL 形式以兼容 Tailwind alpha-value 语法
  */
 :root {
-  /* 亮色(可切换) */
-  --base: 0 0% 98%;          /* #FAFAFA */
-  --surface: 0 0% 100%;      /* #FFFFFF */
-  --elevated: 240 5% 96%;    /* #F4F4F5 */
-  --border: 240 6% 90%;      /* #E4E4E7 */
-  --fg-primary: 240 6% 10%;  /* #18181B */
-  --fg-secondary: 240 4% 35%;/* #52525B */
-  --fg-muted: 240 5% 65%;    /* #A1A1AA */
-  --accent: 217 91% 60%;     /* #3B82F6 电光蓝 */
-  --bull: 4 87% 60%;         /* #F04438 红涨 */
-  --bear: 152 67% 45%;       /* #12B76A 绿跌 */
-  --warning: 32 95% 50%;     /* #F79009 */
-  --danger: 4 87% 60%;       /* #F04438 */
+  /* 亮色(可切换) — 现代简洁风格 */
+  --base: 240 5% 97%;          /* #F7F7F8 微暖底色 */
+  --surface: 0 0% 100%;        /* #FFFFFF 纯白卡片 */
+  --elevated: 240 5% 94%;      /* #F0F0F2 轻度抬高 */
+  --border: 240 6% 90%;        /* #E4E4E7 边框 */
+  --fg-primary: 240 6% 10%;    /* #18181B 主文字 */
+  --fg-secondary: 240 4% 42%;  /* #6B6B75 次要文字,更柔和 */
+  --fg-muted: 240 5% 58%;      /* #8E8E96 辅助文字 */
+  --accent: 250 85% 65%;       /* #7C6FF7 紫罗兰强调色 */
+  --bull: 4 87% 60%;           /* #F04438 红涨 */
+  --bear: 152 67% 45%;         /* #12B76A 绿跌 */
+  --warning: 32 95% 50%;       /* #F79009 */
+  --danger: 4 87% 60%;         /* #F04438 */
 }
 
 html.dark {
-  --base: 240 5% 5%;         /* #0A0A0B */
-  --surface: 240 7% 10%;     /* #18181B 略亮一点,与 base 对比清晰 */
-  --elevated: 240 9% 14%;    /* #212126 */
-  --border: 240 5% 22%;      /* #353539 边框加亮,易识别 */
-  --fg-primary: 0 0% 98%;    /* #FAFAFA */
-  --fg-secondary: 240 5% 78%;/* #C4C4CB 大幅提亮 — 子标题/导航非激活态 */
-  --fg-muted: 240 5% 58%;    /* #8E8E96 muted 提亮 — 辅助提示 */
-  --accent: 217 91% 60%;
+  --base: 240 5% 5%;            /* #0A0A0B */
+  --surface: 240 7% 9%;         /* #151517 略亮于base */
+  --elevated: 240 9% 13%;       /* #1E1E22 */
+  --border: 240 5% 20%;         /* #313135 */
+  --fg-primary: 0 0% 94%;       /* #F0F0F0 */
+  --fg-secondary: 240 5% 72%;   /* #B4B4BD */
+  --fg-muted: 240 5% 55%;       /* #858594 */
+  --accent: 250 85% 68%;
   --bull: 4 87% 60%;
   --bear: 152 67% 45%;
   --warning: 32 95% 50%;
@@ -72,8 +72,32 @@ body {
   background: hsl(var(--base));
   color: hsl(var(--fg-primary));
   font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
-  /* 暗色模式不用 antialiased — 让字形保持饱满,不发虚 */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* 浅色模式: 更清晰的字体渲染 */
+:root body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 深色模式: subpixel 让字形更饱满 */
+html.dark body {
   -webkit-font-smoothing: subpixel-antialiased;
   -moz-osx-font-smoothing: auto;
-  text-rendering: optimizeLegibility;
+}
+
+/* 主题切换过渡 */
+html {
+  transition: color 0.3s ease, background-color 0.3s ease;
+}
+html *, html *::before, html *::after {
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+/* 禁用动画的元素: 避免 toast/loading 闪烁 */
+html .no-theme-transition,
+html .no-theme-transition * {
+  transition: none !important;
 }
