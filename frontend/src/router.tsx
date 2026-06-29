@@ -5,6 +5,7 @@ import { Screener } from './pages/Screener'
 import { Backtest } from './pages/Backtest'
 import { Financials } from './pages/Financials'
 import { Onboarding } from './pages/Onboarding'
+import { Auth } from './pages/Auth'
 import { Data } from './pages/Data'
 import { Monitor } from './pages/Monitor'
 import { Trading } from './pages/Trading'
@@ -13,6 +14,7 @@ import { AnalysisDetail } from './pages/AnalysisDetail'
 import { ConceptAnalysis } from './pages/ConceptAnalysis'
 import { IndustryAnalysis } from './pages/IndustryAnalysis'
 import { StockAnalysis } from './pages/StockAnalysis'
+import { Review } from './pages/Review'
 import { LimitUpLadder } from './pages/LimitUpLadder'
 import { Branding } from './pages/Branding'
 import { Settings } from './pages/Settings'
@@ -50,6 +52,7 @@ function OnboardingGuard({ children }: { children: React.ReactNode }) {
 
 export const router = createBrowserRouter([
   { path: '/onboarding', element: <Onboarding /> },
+  { path: '/login', element: <Auth /> },
   {
     path: '/',
     element: (
@@ -65,6 +68,7 @@ export const router = createBrowserRouter([
       { path: 'concept-analysis', element: <ConceptAnalysis /> },
       { path: 'industry-analysis', element: <IndustryAnalysis /> },
       { path: 'stock-analysis', element: <StockAnalysis /> },
+      { path: 'review', element: <Review /> },
       { path: 'watchlist', element: <Watchlist /> },
       { path: 'screener', element: <Screener /> },
       { path: 'backtest', element: <Backtest /> },

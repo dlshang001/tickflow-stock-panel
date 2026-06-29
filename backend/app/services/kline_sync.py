@@ -223,11 +223,71 @@ def sync_daily_by_quotes(repo: KlineRepository) -> int:
     return daily_df.height
 
 
+def _normalize_adj_factor(raw) -> pl.DataFrame:
+    """Normalize SDK ex_factors response to symbol/trade_date/ex_factor."""
+    if raw is None or len(raw) == 0:
+        return pl.DataFrame()
+    if isinstance(raw, dict):
+        rows: list[dict] = []
+        for sym, values in raw.items():
+            for item in values or []:
+                row = dict(item or {})
+                row.setdefault("symbol", sym)
+                rows.append(row)
+        df = pl.DataFrame(rows) if rows else pl.DataFrame()
+    elif isinstance(raw, pl.DataFrame):
+        df = raw
+    else:
+        df = pl.from_pandas(raw.reset_index() if hasattr(raw, "reset_index") else raw)
+    if df.is_empty():
+        return df
+    # rename: timestamp/date → trade_date, adj_factor → ex_factor
+    # 注意: 新版 SDK 可能同时返回 timestamp 和 trade_date (或 adj_factor 和 ex_factor),
+    # 直接 rename 会产生重复列报错。仅当目标列不存在时才 rename。
+    rename_map: dict[str, str] = {}
+    for src, dst in (("timestamp", "trade_date"), ("date", "trade_date"), ("adj_factor", "ex_factor")):
+        if src in df.columns and dst not in df.columns:
+            rename_map[src] = dst
+    df = df.rename(rename_map)
+    # 确保必要列存在,补齐缺失列
+    if "symbol" not in df.columns:
+        return pl.DataFrame()
+    if "trade_date" not in df.columns and "date" in df.columns:
+        df = df.rename({"date": "trade_date"})
+    if "trade_date" in df.columns:
+        col_type = df.schema["trade_date"]
+        if col_type in {pl.Int64, pl.Int32, pl.UInt64, pl.UInt32, pl.Float64, pl.Float32}:
+            df = df.with_columns(
+                pl.from_epoch(pl.col("trade_date").cast(pl.Int64), time_unit="ms").dt.date().alias("trade_date")
+            )
+        else:
+            df = df.with_columns(pl.col("trade_date").cast(pl.Date, strict=False))
+    # 确保 ex_factor 列存在
+    if "ex_factor" not in df.columns and "adj_factor" in df.columns:
+        df = df.rename({"adj_factor": "ex_factor"})
+    if "ex_factor" in df.columns:
+        df = df.with_columns(pl.col("ex_factor").cast(pl.Float64, strict=False))
+    else:
+        # 缺少 ex_factor 列视为无效
+        return pl.DataFrame()
+    # 强制统一 schema: symbol(str), trade_date(date), ex_factor(float64)
+    try:
+        result = df.select(
+            pl.col("symbol").cast(pl.Utf8),
+            pl.col("trade_date").cast(pl.Date, strict=False),
+            pl.col("ex_factor").cast(pl.Float64, strict=False),
+        ).drop_nulls()
+    except Exception:
+        return pl.DataFrame()
+    return result
+
+
 def sync_adj_factor(symbols: list[str], repo: KlineRepository,
                     capset: CapabilitySet,
                     start_time: datetime | None = None,
                     end_time: datetime | None = None,
-                    on_chunk_done: Callable[[int, int], None] | None = None) -> tuple[int, list[str]]:
+                    on_chunk_done: Callable[[int, int], None] | None = None,
+                    asset_type: str = "stock") -> tuple[int, list[str]]:
     """同步除权因子(Starter+)。SDK 接口:`tf.klines.ex_factors(symbols=...)`。
 
     支持增量: 传 start_time/end_time 只拉取该时间范围内的新除权事件。
@@ -257,10 +317,9 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
             time.sleep(interval)
         try:
             raw = tf.klines.ex_factors(chunk, **sdk_kwargs)
-            if raw is not None and len(raw) > 0:
-                all_dfs.append(pl.from_pandas(
-                    raw.reset_index() if hasattr(raw, "reset_index") else raw
-                ))
+            normalized = _normalize_adj_factor(raw)
+            if not normalized.is_empty():
+                all_dfs.append(normalized)
             logger.debug("adj_factor chunk %d/%d: %d symbols", i + 1, len(chunks), len(chunk))
         except Exception as e:  # noqa: BLE001
             logger.warning("adj_factor chunk %d failed: %s", i + 1, e)
@@ -271,16 +330,34 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
     if not all_dfs:
         return 0, []
 
-    new_data = pl.concat(all_dfs, how="diagonal_relaxed") if len(all_dfs) > 1 else all_dfs[0]
+    # 强制统一全部 DataFrame 的 schema,避免 concat 因类型不一致而报错
+    def _canonicalize(df: pl.DataFrame) -> pl.DataFrame:
+        if df.is_empty():
+            return df
+        exprs: list = [pl.col("symbol").cast(pl.Utf8)]
+        if "trade_date" in df.columns:
+            exprs.append(pl.col("trade_date").cast(pl.Date, strict=False))
+        if "ex_factor" in df.columns:
+            exprs.append(pl.col("ex_factor").cast(pl.Float64, strict=False))
+        return df.select(exprs)
 
-    # 提取受影响的 symbol 列表(合并前)
+    canonical_dfs = [_canonicalize(d) for d in all_dfs if not d.is_empty()]
+    if not canonical_dfs:
+        return 0, []
+
+    new_data = pl.concat(canonical_dfs, how="diagonal_relaxed") if len(canonical_dfs) > 1 else canonical_dfs[0]
+
+    # 提取受影响的 symbol 列表
     affected = new_data["symbol"].unique().to_list()
 
-    out = repo.store.data_dir / "adj_factor" / "all.parquet"
+    factor_dir = "adj_factor_etf" if asset_type == "etf" else "adj_factor"
+    out = repo.store.data_dir / factor_dir / "all.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
 
     if out.exists():
         existing = pl.read_parquet(out)
+        # 统一列结构与类型：旧数据可能含 index/timestamp 等额外列，trade_date 也可能是 String 而非 Date
+        existing = _canonicalize(existing)
         before = existing.height
         merged = pl.concat([existing, new_data]).unique(
             subset=["symbol", "trade_date"], keep="last",
@@ -443,6 +520,21 @@ def fetch_minute_single(symbol: str, trade_date: date) -> pl.DataFrame:
     if raw is not None and len(raw) > 0:
         return _normalize_minute(raw)
     return pl.DataFrame()
+
+
+def fetch_adj_factor_single(symbol: str) -> pl.DataFrame:
+    """从 TickFlow 实时拉取单股除权因子(不写入本地), 用于单股 K 线即时前复权。
+
+    返回结构: symbol, trade_date, ex_factor (空 DataFrame 表示无除权事件或拉取失败)。
+    与 _apply_adj_factor / compute_enriched 的 factors 参数格式一致。
+    """
+    tf = get_client()
+    try:
+        raw = tf.klines.ex_factors([symbol], as_dataframe=True, show_progress=False)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("fetch_adj_factor_single(%s) failed: %s", symbol, e)
+        return pl.DataFrame()
+    return _normalize_adj_factor(raw)
 
 
 def _latest_minute_datetime(repo: KlineRepository) -> datetime | None:

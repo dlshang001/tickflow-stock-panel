@@ -1,7 +1,7 @@
 """盘后管道 + 盘前维表同步。
 
 调度:
-  09:10 盘前 — 同步标的维表 instruments (全量覆盖)
+  09:10 盘前 — 同步个股维表 instruments (全量覆盖)
   15:30 盘后 — 日K同步 + 增量除权因子 + enriched 计算 + 刷新视图
 
 盘后同步策略:
@@ -20,7 +20,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.indicators.pipeline import run_pipeline
 from app.config import settings
-from app.services import index_sync, instrument_sync, kline_sync
+from app.services import index_sync, instrument_sync, kline_sync, preferences as _prefs
 from app.tickflow.capabilities import Cap, CapabilitySet
 from app.tickflow.pools import DEMO_SYMBOLS, get_pool
 from app.tickflow.repository import KlineRepository
@@ -69,7 +69,7 @@ def _resolve_universe(capset: CapabilitySet) -> list[str]:
 
 
 def run_instruments_sync(repo: KlineRepository) -> dict:
-    """盘前同步标的维表。"""
+    """盘前同步个股维表。"""
     rows = instrument_sync.sync_instruments(repo.store.data_dir)
     _refresh_instruments_view(repo)
     _invalidate("instruments")
@@ -89,12 +89,12 @@ def run_now(
     emit = on_progress or _noop
     skipped: list[str] = []
 
-    # Step 0: 先同步标的维表, 再解析标的池 — 确保标的池基于最新 instruments
-    emit("sync_instruments", 2, "同步标的维表…")
+    # Step 0: 先同步个股维表, 再解析标的池 — 确保标的池基于最新 instruments
+    emit("sync_instruments", 2, "同步个股维表…")
     inst_rows = instrument_sync.sync_instruments(repo.store.data_dir)
     if inst_rows > 0:
         _refresh_instruments_view(repo)
-    emit("sync_instruments", 8, f"标的维表同步完成,{inst_rows} 只标的")
+    emit("sync_instruments", 8, f"个股维表同步完成,{inst_rows} 只标的")
     _invalidate("instruments")
 
     emit("resolve_universe", 9, "解析标的池…")
@@ -110,8 +110,16 @@ def run_now(
     today = _date.today()
     today_exists = latest_daily and latest_daily >= today
     new_daily_days = 0
+    # 日K范围拉取的起点(分支3补缺口/分支4首次); 实时增量/跳过时为 None。
+    # 供 Step 1.5 除权因子回溯范围对齐: 范围拉取→用日K范围, 非范围→最近N天兜底。
+    daily_range_start: _date | None = None
 
-    if today_exists and capset.has(Cap.QUOTE_POOL):
+    # A 股日K拉取开关(默认开);关闭时跳过日K同步,保留已有数据
+    pull_a_share = _prefs.get_pipeline_pull_a_share()
+    if not pull_a_share:
+        emit("sync_daily", 45, "已跳过 A 股日K同步(拉取内容未勾选)")
+        logger.info("sync_daily: skipped (pipeline_pull_a_share=False)")
+    elif today_exists and capset.has(Cap.QUOTE_POOL):
         # 付费档:今天有数据(QuoteService 已落盘)→ 实时行情覆写,确保最新。
         # free/none 档无 quote.pool 能力,即便今天已有数据(如从 expert 降级),
         # 也降级到下方 batch 路径刷新,避免调用无权限的实时行情接口。
@@ -125,6 +133,7 @@ def run_now(
         # 也覆盖"今天已有数据但无实时行情权限(free/none)"的降级场景:
         #   此时 start_date = latest_daily = today,batch 刷新当天日K。
         start_date = latest_daily
+        daily_range_start = start_date
         emit("sync_daily", 12, f"获取日K [{start_date} ~ {today}]…")
         logger.info("sync_daily: [%s ~ %s] %s", start_date, today,
                     "refresh today" if today_exists else "gap fill")
@@ -145,6 +154,7 @@ def run_now(
     else:
         # 首次：无任何数据 → batch 拉 1 年
         start_date = today - _td(days=365)
+        daily_range_start = start_date
         emit("sync_daily", 12, f"获取日K [{start_date} ~ {today}]…")
         logger.info("sync_daily: [%s ~ %s] initial fetch", start_date, today)
 
@@ -162,36 +172,22 @@ def run_now(
         logger.info("sync_daily: [%s ~ %s] done", start_date, today)
     _invalidate("daily")
 
-    # Step 1.5: 增量同步除权因子 — 从已有数据最新日期的下一天开始获取
+    # Step 1.5: 同步除权因子 — 范围与日K拉取方式对齐
+    #   日K范围拉取(补缺口/首次) → 除权用日K范围 [daily_range_start, now]
+    #     首次会覆盖整个日K区间内的历史除权事件; 补缺口天然只增量(起点=latest_daily≈昨天)
+    #   日K实时增量/跳过(分支2/分支1) → 除权兜底拉最近 30 天, 补可能遗漏的新除权
+    #     (这两类分支不拉历史日K, 除权不能用日K范围, 只能兜底最近几日)
     written_adj = 0
     affected_symbols: list[str] = []
     if capset.has(Cap.ADJ_FACTOR):
         from datetime import datetime, timedelta
         adj_end = datetime.now()
-        # 从已有除权因子数据的最新日期开始获取，避免重复拉取
-        adj_factor_path = repo.store.data_dir / "adj_factor" / "all.parquet"
-        fallback_start = adj_end - timedelta(days=30)
-        if adj_factor_path.exists():
-            try:
-                from datetime import date as date_cls
-                max_date = pl.scan_parquet(adj_factor_path).select(
-                    pl.col("trade_date").max()
-                ).collect().item()
-                if max_date is not None:
-                    # trade_date 可能是 date / datetime / string 类型
-                    if isinstance(max_date, str):
-                        td = date_cls.fromisoformat(max_date)
-                    elif isinstance(max_date, datetime):
-                        td = max_date.date()
-                    else:
-                        td = max_date
-                    adj_start = datetime.combine(td, datetime.min.time())
-                else:
-                    adj_start = fallback_start
-            except Exception:
-                adj_start = fallback_start
+        if daily_range_start is not None:
+            adj_start = datetime.combine(daily_range_start, datetime.min.time())
         else:
-            adj_start = fallback_start
+            # 日K实时增量/跳过时, 除权兜底拉最近 N 天, 覆盖周末/长假/停机期间的新除权事件。
+            # 15 天: 覆盖春节/国庆最长约10天长假 + 故障恢复缓冲; sync_adj_factor 内部 merge+unique 幂等, 多拉无副作用。
+            adj_start = adj_end - timedelta(days=15)
         adj_start_str = adj_start.strftime("%Y-%m-%d")
         adj_end_str = adj_end.strftime("%Y-%m-%d")
         emit("sync_adj", 50, f"获取除权因子 [{adj_start_str} ~ {adj_end_str}]…")
@@ -291,33 +287,119 @@ def run_now(
     _refresh_single_view(repo, "kline_enriched")
     _invalidate("enriched")
 
-    # Step 2.3: 指数同步 — 独立 kline_index_* 存储，不进入股票选股/策略链路。
+    # Step 2.3: 指数 / ETF 同步 — 物理分开存储；ETF 可复权，指数不复权。
     written_index_daily = 0
+    written_etf_daily = 0
     index_count = 0
-    if capset.has(Cap.KLINE_DAILY_BATCH):
-        emit("sync_index", 88, "同步指数列表与日K…")
+    etf_count = 0
+    etf_adj_symbols = 0
+    pull_index = _prefs.get_pipeline_pull_index()
+    pull_etf = _prefs.get_pipeline_pull_etf()
+
+    if capset.has(Cap.KLINE_DAILY_BATCH) and (pull_index or pull_etf):
+        _types = []
+        if pull_index:
+            _types.append("指数")
+        if pull_etf:
+            _types.append("ETF")
+        emit("sync_index", 88, f"同步{'+'.join(_types)}日K…")
+        # 子阶段进度分配: 88.0(开始) → 89.0(完成), 指数占前半, ETF 占后半
         try:
-            index_count = index_sync.sync_index_instruments(repo)
-            index_dir = repo.store.data_dir / "kline_index_enriched"
-            index_dates = sorted(
-                d.name[5:] for d in index_dir.glob("date=*")
-                if d.is_dir() and d.name.startswith("date=")
-            ) if index_dir.exists() else []
-            index_start = _date.fromisoformat(index_dates[-1]) if index_dates else today - _td(days=365)
-            written_index_daily = index_sync.sync_and_persist_index_daily(
-                repo,
-                capset,
-                start_date=_dt.combine(index_start, _dt.min.time()),
-                end_date=_dt.combine(today, _dt.min.time()),
-            )
+            if pull_index:
+                emit("sync_index", 88, "同步指数维表…")
+                index_count = index_sync.sync_index_instruments(repo, pull_index=True, pull_etf=False)
+                emit("sync_index", 88, f"指数维表完成,{index_count} 只")
+                index_dir = repo.store.data_dir / "kline_index_enriched"
+                index_dates = sorted(
+                    d.name[5:] for d in index_dir.glob("date=*")
+                    if d.is_dir() and d.name.startswith("date=")
+                ) if index_dir.exists() else []
+                index_start = _date.fromisoformat(index_dates[-1]) if index_dates else today - _td(days=365)
+
+                def _index_chunk(cur: int, tot: int) -> None:
+                    emit("sync_index", 88, f"指数日K批次 {cur}/{tot}",
+                         stage_pct=int(100 * cur / tot) if tot else 100, skip_log=cur < tot)
+
+                written_index_daily = index_sync.sync_and_persist_index_daily(
+                    repo,
+                    capset,
+                    start_date=_dt.combine(index_start, _dt.min.time()),
+                    end_date=_dt.combine(today, _dt.min.time()),
+                    on_chunk_done=_index_chunk,
+                )
+                emit("sync_index", 88, f"指数日K完成,{written_index_daily} 行")
+                _invalidate("index_instruments")
+                _invalidate("index_daily")
+                _invalidate("index_enriched")
+
+            if pull_etf:
+                emit("sync_index", 88, "同步 ETF 维表…")
+                etf_count = index_sync.sync_etf_instruments(repo)
+                emit("sync_index", 88, f"ETF 维表完成,{etf_count} 只")
+                etf_symbols: list[str] = []
+                etf_inst = repo.get_etf_instruments()
+                if not etf_inst.is_empty() and "symbol" in etf_inst.columns:
+                    etf_symbols = sorted(set(etf_inst["symbol"].to_list()))
+                if etf_symbols and capset.has(Cap.ADJ_FACTOR):
+                    try:
+                        emit("sync_index", 88, "同步 ETF 除权因子…")
+                        from datetime import datetime, timedelta
+                        adj_end = datetime.now()
+                        adj_path = repo.store.data_dir / "adj_factor_etf" / "all.parquet"
+                        fallback_start = adj_end - timedelta(days=30)
+                        adj_start = fallback_start
+                        if adj_path.exists():
+                            max_date = pl.scan_parquet(adj_path).select(pl.col("trade_date").max()).collect().item()
+                            if max_date is not None:
+                                if isinstance(max_date, str):
+                                    adj_start = datetime.combine(_date.fromisoformat(max_date), datetime.min.time())
+                                elif isinstance(max_date, datetime):
+                                    adj_start = datetime.combine(max_date.date(), datetime.min.time())
+                                else:
+                                    adj_start = datetime.combine(max_date, datetime.min.time())
+                        _, affected_etfs = index_sync.sync_etf_adj_factor(
+                            etf_symbols,
+                            repo,
+                            capset,
+                            start_time=adj_start,
+                            end_time=adj_end,
+                        )
+                        etf_adj_symbols = len(affected_etfs)
+                        emit("sync_index", 88, f"ETF 除权因子完成,{etf_adj_symbols} 只")
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("ETF adj_factor skipped: %s", e)
+                etf_dir = repo.store.data_dir / "kline_etf_enriched"
+                etf_dates = sorted(
+                    d.name[5:] for d in etf_dir.glob("date=*")
+                    if d.is_dir() and d.name.startswith("date=")
+                ) if etf_dir.exists() else []
+                etf_start = _date.fromisoformat(etf_dates[-1]) if etf_dates else today - _td(days=365)
+
+                def _etf_chunk(cur: int, tot: int) -> None:
+                    emit("sync_index", 88, f"ETF 日K批次 {cur}/{tot}",
+                         stage_pct=int(100 * cur / tot) if tot else 100, skip_log=cur < tot)
+
+                written_etf_daily = index_sync.sync_and_persist_etf_daily(
+                    repo,
+                    capset,
+                    start_date=_dt.combine(etf_start, _dt.min.time()),
+                    end_date=_dt.combine(today, _dt.min.time()),
+                    on_chunk_done=_etf_chunk,
+                )
+                emit("sync_index", 88, f"ETF 日K完成,{written_etf_daily} 行")
+                _invalidate("etf_instruments")
+                _invalidate("etf_daily")
+
             repo.refresh_index_views()
-            _invalidate("index_instruments")
-            _invalidate("index_daily")
-            _invalidate("index_enriched")
-            emit("sync_index", 89, f"指数完成,{index_count} 只指数,{written_index_daily} 行日K")
+            emit(
+                "sync_index",
+                89,
+                f"同步完成,指数 {index_count} 只/{written_index_daily} 行, ETF {etf_count} 只/{written_etf_daily} 行"
+                + (f", ETF复权 {etf_adj_symbols} 只" if etf_adj_symbols else ""),
+            )
         except Exception as e:  # noqa: BLE001
-            logger.warning("sync_index failed: %s", e)
-            emit("sync_index", 89, f"指数同步失败:{e}")
+            logger.warning("sync_index/etf failed: %s", e)
+            emit("sync_index", 89, f"指数/ETF同步失败:{e}")
     else:
         skipped.append("sync_index")
 
@@ -364,6 +446,9 @@ def run_now(
         "enriched_days": written_enriched,
         "index_count": index_count,
         "index_daily_rows": written_index_daily,
+        "etf_count": etf_count,
+        "etf_daily_rows": written_etf_daily,
+        "etf_adj_factor_symbols": etf_adj_symbols,
         "minute_rows": written_minute,
         "skipped_stages": skipped,
     }
@@ -377,10 +462,15 @@ def _refresh_views(repo: KlineRepository) -> None:
         "kline_enriched": f"{d}/kline_daily_enriched/**/*.parquet",
         "kline_index_daily": f"{d}/kline_index_daily/**/*.parquet",
         "kline_index_enriched": f"{d}/kline_index_enriched/**/*.parquet",
+        "kline_etf_daily": f"{d}/kline_etf_daily/**/*.parquet",
+        "kline_etf_enriched": f"{d}/kline_etf_enriched/**/*.parquet",
+        "kline_etf_minute": f"{d}/kline_etf_minute/**/*.parquet",
         "kline_minute": f"{d}/kline_minute/**/*.parquet",
         "adj_factor": f"{d}/adj_factor/**/*.parquet",
+        "adj_factor_etf": f"{d}/adj_factor_etf/**/*.parquet",
         "instruments": f"{d}/instruments/**/*.parquet",
         "instruments_index": f"{d}/instruments_index/**/*.parquet",
+        "instruments_etf": f"{d}/instruments_etf/**/*.parquet",
     }
     for name, path in views.items():
         try:
@@ -390,6 +480,7 @@ def _refresh_views(repo: KlineRepository) -> None:
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("refresh view %s failed: %s", name, e)
+    repo.store._register_unified_views()
 
 
 def _refresh_single_view(repo: KlineRepository, name: str) -> None:
@@ -400,10 +491,15 @@ def _refresh_single_view(repo: KlineRepository, name: str) -> None:
         "kline_enriched": f"{d}/kline_daily_enriched/**/*.parquet",
         "kline_index_daily": f"{d}/kline_index_daily/**/*.parquet",
         "kline_index_enriched": f"{d}/kline_index_enriched/**/*.parquet",
+        "kline_etf_daily": f"{d}/kline_etf_daily/**/*.parquet",
+        "kline_etf_enriched": f"{d}/kline_etf_enriched/**/*.parquet",
+        "kline_etf_minute": f"{d}/kline_etf_minute/**/*.parquet",
         "kline_minute": f"{d}/kline_minute/**/*.parquet",
         "adj_factor": f"{d}/adj_factor/**/*.parquet",
+        "adj_factor_etf": f"{d}/adj_factor_etf/**/*.parquet",
         "instruments": f"{d}/instruments/**/*.parquet",
         "instruments_index": f"{d}/instruments_index/**/*.parquet",
+        "instruments_etf": f"{d}/instruments_etf/**/*.parquet",
     }
     path = paths.get(name)
     if not path:
@@ -454,10 +550,73 @@ def _run_tracked(fn, job_label: str) -> None:
         job_store.fail(job_id, f"scheduled {job_label} failed")
 
 
+# ================================================================
+# 定时复盘 (AI 大盘复盘报告)
+# ================================================================
+
+REVIEW_JOB_ID = "scheduled_review"
+
+
+async def _run_scheduled_review(repo) -> None:
+    """定时复盘 job: 调用非流式复盘生成 → 落盘归档(与手动生成同格式)。
+
+    静默执行, 不推送 SSE/系统通知 —— 用户下次打开复盘页即可看到新报告。
+    任何异常都吞掉只记日志, 绝不影响调度器主循环。
+    """
+    try:
+        from app.services.market_recap import recap_market_once
+        from app.services import market_recap_reports
+        from app import secrets_store as ss
+
+        # AI Key 未配置时跳过(避免每日报错刷日志)
+        if not ss.get_ai_key():
+            logger.info("scheduled review skipped: AI key not configured")
+            return
+
+        app_state = _get_app_state()
+        quote_service = getattr(app_state, "quote_service", None) if app_state else None
+        depth_service = getattr(app_state, "depth_service", None) if app_state else None
+
+        content, meta = await recap_market_once(repo, quote_service, depth_service)
+        if not content:
+            logger.warning("scheduled review produced no content (meta=%s)", meta)
+            return
+
+        # 落盘: 与手动生成完全相同的归档格式
+        market_recap_reports.save_report({
+            "as_of": meta.get("as_of"),
+            "focus": "",
+            "content": content,
+            "summary": meta.get("summary", ""),
+            "emotion_score": meta.get("emotion_score"),
+            "emotion_label": meta.get("emotion_label", ""),
+        })
+        logger.info("scheduled review saved: as_of=%s", meta.get("as_of"))
+    except Exception as e:  # noqa: BLE001
+        logger.exception("scheduled review failed: %s", e)
+
+
+def _register_review_job(scheduler, repo, hour: int, minute: int) -> None:
+    """注册/更新定时复盘 job(工作日 mon-fri, Asia/Shanghai)。
+
+    供 start_scheduler(启动时) 和 settings API(改时间时) 共用。
+    用 replace_existing=True, 重复注册只更新 trigger。
+    """
+    scheduler.add_job(
+        lambda: _run_scheduled_review(repo),
+        trigger=CronTrigger(day_of_week="mon-fri",
+                            hour=hour, minute=minute,
+                            timezone="Asia/Shanghai"),
+        id=REVIEW_JOB_ID,
+        misfire_grace_time=7200,  # 复盘非关键, 允许 2 小时内补跑
+        replace_existing=True,
+    )
+
+
 def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOScheduler:
     """启动调度器。
 
-    工作日 09:10 — 同步标的维表
+    工作日 09:10 — 同步个股维表
     工作日 HH:MM — 盘后管道（时间由用户偏好决定，默认 15:30）
     """
     from app.services import preferences
@@ -469,9 +628,9 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
     # 盘前: 同步 instruments（时间由偏好决定）
     def _instruments_task(on_progress=None):
         emit = on_progress or _noop
-        emit("sync_instruments", 0, "同步标的维表…")
+        emit("sync_instruments", 0, "同步个股维表…")
         result = run_instruments_sync(repo)
-        emit("done", 100, f"标的维表同步完成,{result.get('instruments_rows', 0)} 只标的")
+        emit("done", 100, f"个股维表同步完成,{result.get('instruments_rows', 0)} 只标的")
         return result
 
     scheduler.add_job(
@@ -515,6 +674,16 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
         misfire_grace_time=3600,
         replace_existing=True,
     )
+
+    # 定时复盘 (AI 大盘复盘报告): 工作日到点自动生成并归档。
+    # 默认关闭 —— 仅当用户在复盘页开启时才注册 job。
+    # 复用 recap_market_once(非流式) + market_recap_reports.save_report(落盘)。
+    # quote_service / depth_service 通过 _get_app_state() 延迟取用。
+    review_sched = preferences.get_review_schedule()
+    if review_sched["enabled"]:
+        _register_review_job(scheduler, repo, review_sched["hour"], review_sched["minute"])
+        logger.info("scheduled_review enabled @%02d:%02d mon-fri",
+                    review_sched["hour"], review_sched["minute"])
 
     scheduler.start()
     logger.info("scheduler started; instruments@%02d:%02d, pipeline@%02d:%02d, depth@%02d:%02d mon-fri",

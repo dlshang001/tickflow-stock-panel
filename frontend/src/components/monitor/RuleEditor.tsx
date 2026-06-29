@@ -1,9 +1,11 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Save, X, Plus, Search } from 'lucide-react'
 import { api, genRuleId, type MonitorRule, type MonitorCondition } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { SignalPicker } from '@/components/screener/SignalPicker'
+import { usePreferences } from '@/lib/useSharedQueries'
 
 interface Props {
   /** 编辑现有规则;null=新建 */
@@ -42,9 +44,15 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
   const qc = useQueryClient()
   const options = useQuery({ queryKey: QK.monitorRuleOptions, queryFn: api.monitorRuleOptions })
   const strategies = useQuery({ queryKey: QK.screenerStrategies, queryFn: api.screenerStrategies })
+  const { data: prefs } = usePreferences()
+  const feishuConfigured = !!(prefs?.feishu_webhook_url)
   const [editing] = useState(!!rule)
+  // 新建规则: 预填全局「默认推送渠道」(飞书), preset 显式指定时以 preset 为准。
+  // 编辑规则: 完全沿用规则自身配置, 不受默认值影响。
   const [draft, setDraft] = useState<MonitorRule>(
-    rule ? { ...rule, conditions: rule.conditions.map(c => ({ ...c })) } : emptyRule(preset),
+    rule
+      ? { ...rule, conditions: rule.conditions.map(c => ({ ...c })) }
+      : { ...emptyRule(preset), webhook_enabled: preset?.webhook_enabled ?? !!(prefs?.webhook_enabled_default) },
   )
   const [error, setError] = useState('')
   const [symbolQuery, setSymbolQuery] = useState('')
@@ -92,7 +100,8 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
       ...d,
       conditions: [...d.conditions, op === 'truth'
         ? { field: 'signal_volume_surge', op: 'truth' }
-        : { field: 'rsi_14', op: '<', value: 30 }],
+        // simple 模式(个股弹窗)默认现价; 完整模式默认 RSI 超卖
+        : { field: simple ? 'close' : 'rsi_14', op: '<', value: simple ? 0 : 30 }],
     }))
   const removeCond = (idx: number) =>
     setDraft(d => ({ ...d, conditions: d.conditions.filter((_, i) => i !== idx) }))
@@ -137,6 +146,38 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
         <div>
           <div className="mb-1.5 text-[11px] text-muted">选择触发信号 (任一命中即报警)</div>
           <SignalPicker signals={selectedSignals} onChange={onSignalPickerChange} kind="entry" />
+        </div>
+
+        {/* 价位条件 (阈值) — 与信号共存, 可选添加 */}
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-muted">价位条件 (可选)</span>
+            <button onClick={() => addCond('threshold')} className="inline-flex items-center gap-1 text-[11px] text-accent hover:text-accent/80 cursor-pointer">
+              <Plus className="h-3 w-3" />添加价位
+            </button>
+          </div>
+          {thresholdConds.length > 0 && (
+            <div className="space-y-1.5">
+              {thresholdConds.map((c, i) => {
+                const realIdx = draft.conditions.indexOf(c)
+                return (
+                  <div key={i} className="flex items-center gap-1.5">
+                    <span className="text-[10px] text-muted/60 w-6 text-right shrink-0">{i === 0 && selectedSignals.length === 0 ? '当' : draft.logic === 'and' ? '且' : '或'}</span>
+                    <select value={c.field} onChange={e => updateCond(realIdx, { field: e.target.value })} className="flex-1 h-7 px-1.5 rounded bg-base border border-border text-[11px] text-foreground focus:outline-none focus:border-accent/50">
+                      {thresholdFields.map(f => <option key={f.key} value={f.key}>{f.label}</option>)}
+                    </select>
+                    <select value={c.op} onChange={e => updateCond(realIdx, { op: e.target.value })} className="w-12 h-7 px-1 rounded bg-base border border-border text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50">
+                      {operators.map(op => <option key={op} value={op}>{op}</option>)}
+                    </select>
+                    <input type="number" value={c.value ?? 0} onChange={e => updateCond(realIdx, { value: parseFloat(e.target.value) })} step="any" className="w-24 h-7 px-1.5 rounded bg-base border border-border text-[11px] font-mono text-foreground text-center focus:outline-none focus:border-accent/50" />
+                    <button onClick={() => removeCond(realIdx)} className="p-1 rounded text-muted hover:text-danger hover:bg-danger/10 cursor-pointer">
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+          )}
         </div>
 
         <label className="space-y-1.5">
@@ -335,21 +376,59 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
         </label>
       </div>
 
-      {/* Webhook 推送 (占位, 后续开发) */}
+      {/* Webhook 推送 — 飞书可用, QMT/ptrade 待定 */}
       <div className="rounded-btn border border-border/40 bg-base/40 p-3 space-y-2">
-        <div className="flex items-center justify-between">
-          <div>
-            <span className="text-[11px] font-medium text-foreground">Webhook 推送</span>
-            <span className="ml-1.5 rounded bg-muted/10 px-1 py-px text-[9px] text-muted">开发中</span>
-          </div>
-          <label className="flex items-center gap-1.5 cursor-not-allowed opacity-50">
+        <div className="flex items-center gap-1.5">
+          <span className="text-[11px] font-medium text-foreground">Webhook 推送</span>
+          <span className="text-[9px] text-muted">触发时推送告警到外部</span>
+        </div>
+
+        {/* 渠道列表 */}
+        <div className="space-y-1.5">
+          {/* 飞书 (可用) */}
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={!!draft.webhook_enabled}
+              onChange={e => setDraft(d => ({ ...d, webhook_enabled: e.target.checked }))}
+              className="h-3 w-3 accent-accent cursor-pointer"
+            />
+            <span className="text-[11px] text-foreground">飞书</span>
+            <span className="text-[9px] text-muted">群机器人</span>
+            {draft.webhook_enabled && (
+              <span className={`ml-auto text-[9px] ${feishuConfigured ? 'text-emerald-500' : 'text-warning'}`}>
+                {feishuConfigured ? '已配置' : '未配置'}
+              </span>
+            )}
+          </label>
+
+          {/* QMT (待定) */}
+          <label className="flex items-center gap-2 cursor-not-allowed opacity-50">
             <input type="checkbox" disabled className="h-3 w-3 accent-accent" />
-            <span className="text-[10px] text-muted">启用</span>
+            <span className="text-[11px] text-secondary">QMT</span>
+            <span className="rounded bg-muted/10 px-1 py-px text-[9px] text-muted">待定</span>
+          </label>
+
+          {/* ptrade (待定) */}
+          <label className="flex items-center gap-2 cursor-not-allowed opacity-50">
+            <input type="checkbox" disabled className="h-3 w-3 accent-accent" />
+            <span className="text-[11px] text-secondary">ptrade</span>
+            <span className="rounded bg-muted/10 px-1 py-px text-[9px] text-muted">待定</span>
           </label>
         </div>
-        <p className="text-[10px] leading-relaxed text-muted">
-          触发时把信号推送到外部软件 (如 QMT、掘金量化),实现自动下单。后续版本支持。
-        </p>
+
+        {/* 飞书勾选但全局未配置 → 提示前往设置 */}
+        {draft.webhook_enabled && !feishuConfigured && (
+          <p className="text-[10px] leading-relaxed text-warning/80">
+            飞书 Webhook 地址尚未配置,
+            <Link to="/settings?tab=monitoring" className="text-accent hover:text-accent/80">前往设置页配置 →</Link>
+          </p>
+        )}
+        {draft.webhook_enabled && feishuConfigured && (
+          <p className="text-[10px] leading-relaxed text-muted">
+            命中本规则时,告警将推送到设置页配置的飞书群。
+          </p>
+        )}
       </div>
 
       {error && <div className="rounded-btn border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger">{error}</div>}

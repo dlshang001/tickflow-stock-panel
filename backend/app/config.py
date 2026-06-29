@@ -17,21 +17,31 @@ _IS_FROZEN = getattr(sys, "frozen", False)
 
 
 def _user_data_root() -> Path:
-    """桌面版用户数据根目录 (跨平台持久可写)。
+    """桌面版用户数据根目录。
 
-    Windows: %LOCALAPPDATA%/TickFlowStockPanel/TickFlowStockPanel
-    macOS:   ~/Library/Application Support/TickFlowStockPanel
-    Linux:   ~/.local/share/TickFlowStockPanel
+    定位策略 (按优先级):
+      1. 环境变量 DATA_DIR (pydantic-settings 自动注入到 settings.data_dir, 不在此处理)
+      2. 打包桌面版: exe 同级的 data/ 子目录 (<安装目录>/data/)
+         —— 与程序同处一个总目录 (用户选择的安装目录), 视觉直观, 便于备份/迁移。
+      3. 非 frozen (开发模式): 项目根 data/
 
-    注意: platformdirs 已含应用名, 切勿再拼一层。
+    为什么不用 platformdirs 默认 (%LOCALAPPDATA%) 作为主路径:
+      - 落在 C 盘系统目录, 用户不易察觉, 占系统盘空间
+      - 用户期望「数据跟随程序」(便于备份/迁移)
+    为什么放 {app}/data (exe 旁的 data/) 而非 {app} 外的兄弟目录:
+      - 用户体验: 用户选了安装目录, 自然期望「程序和数据都在这」, 单一总目录更直观。
+      - 数据安全: Inno Setup 覆盖安装(升级)时只往 {app} 写新程序文件, 不会清空
+        目录里不在安装清单上的运行时文件 (data/ 即此类), 故覆盖安装不丢数据。
+        (注意: 卸载时需在 .iss 中豁免 data/, 见 packaging/tickflow.iss 的 [UninstallDelete]。)
+    旧版本数据迁移: 见 DataStore._migrate_legacy_data_dir(), 老用户首次启动自动搬迁。
     """
-    try:
-        from platformdirs import user_data_dir
+    # 打包桌面版: exe 同级的 data/ 子目录 (与程序同一总目录, 覆盖安装不丢数据)
+    if _IS_FROZEN:
+        exe_dir = Path(sys.executable).resolve().parent
+        return exe_dir / "data"
 
-        return Path(user_data_dir("TickFlowStockPanel"))
-    except Exception:  # noqa: BLE001
-        # platformdirs 不可用时兜底: 可执行文件旁的 data/
-        return Path(sys.executable).resolve().parent / "data"
+    # 开发模式: 项目根 data/
+    return _PROJECT_ROOT / "data"
 
 
 def _resource_root() -> Path:
@@ -84,8 +94,13 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     backtest_range_guard: bool = False
 
-    # Data — frozen: 用户数据目录; 非 frozen: 项目根目录的 data/ (可被 DATA_DIR 覆盖)
-    data_dir: Path = _user_data_root() if _IS_FROZEN else (_PROJECT_ROOT / "data")
+    # Auth — 首次启动时预置访问密码(明文, 仅用于初始化, 详见 services/auth.bootstrap_from_env)
+    # 公网服务器部署时免去 SSH 端口转发设密码的麻烦。写入 auth.json(哈希)后即不再读取。
+    auth_password: str = ""
+
+    # Data — frozen: exe 同级 data/ 子目录; 非 frozen: 项目根 data/
+    # (均可被环境变量 DATA_DIR 覆盖, pydantic-settings 自动注入)
+    data_dir: Path = _user_data_root()
 
     # tiers.yaml 路径 — frozen: 资源目录内; 非 frozen: 项目根目录
     tiers_yaml: Path = _RESOURCE_ROOT / "tiers.yaml" if _IS_FROZEN else _PROJECT_ROOT / "tiers.yaml"

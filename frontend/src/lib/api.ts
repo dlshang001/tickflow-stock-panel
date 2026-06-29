@@ -16,7 +16,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     let detail = ''
     try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
     const msg = detail || `${res.status} ${res.statusText}`
-    toast(msg, 'error')
+    // 401 (未登录/会话过期) 不弹 toast — 由全局认证拦截器统一跳登录页, 避免刷屏
+    if (res.status !== 401) toast(msg, 'error')
     throw new Error(msg)
   }
   return res.json() as Promise<T>
@@ -196,6 +197,7 @@ export interface WatchlistEntry {
   symbol: string
   added_at: string
   note?: string
+  name?: string | null
 }
 
 export interface Quote {
@@ -317,6 +319,18 @@ export interface OverviewMarket {
   industry_rank: { leading: OverviewDimensionRankItem[]; lagging: OverviewDimensionRankItem[] }
 }
 
+// ===== 大盘复盘 =====
+export interface AiReviewReport {
+  id: string
+  as_of: string
+  focus?: string
+  content: string
+  summary?: string
+  emotion_score?: number | null
+  emotion_label?: string
+  created_at: string
+}
+
 // ===== Strategy Engine =====
 export interface StrategyParamDef {
   id: string
@@ -343,6 +357,7 @@ export interface StrategyDetail {
   entry_signals: string[]
   exit_signals: string[]
   stop_loss: number | null
+  take_profit: number | null
   trailing_stop: number | null
   trailing_take_profit_activate: number | null
   trailing_take_profit_drawdown: number | null
@@ -428,6 +443,8 @@ export interface AlertEvent {
   signals?: string[]
   severity?: string
   strategy_id?: string
+  conditions?: MonitorCondition[]
+  logic?: 'and' | 'or'
 }
 
 /** 生成监控规则 id (时间戳 + 随机后缀), 用户无需手动填写。 */
@@ -569,6 +586,7 @@ export interface StrategyBacktestResult {
     entry_signals: string[]
     exit_signals: string[]
     stop_loss: number | null
+    take_profit: number | null
     trailing_stop: number | null
     trailing_take_profit_activate: number | null
     trailing_take_profit_drawdown: number | null
@@ -642,6 +660,20 @@ export interface Preferences {
   indices_nav_pinned: boolean
   minute_sync_enabled: boolean
   minute_sync_days: number
+  daily_data_provider?: string
+  adj_factor_provider?: string
+  minute_data_provider?: string
+  realtime_data_provider?: string
+  realtime_watchlist_symbols?: string[]
+  realtime_pull_stock?: boolean
+  realtime_pull_etf?: boolean
+  realtime_pull_index?: boolean
+  realtime_index_mode?: 'core' | 'all'
+  realtime_index_symbols?: string[]
+  pipeline_pull_a_share: boolean
+  pipeline_pull_etf: boolean
+  pipeline_pull_index: boolean
+  pipeline_index_symbols: string
   pipeline_schedule: { hour: number; minute: number }
   instruments_schedule: { hour: number; minute: number }
   enriched_batch_size: number
@@ -649,10 +681,14 @@ export interface Preferences {
   limit_ladder_monitor_enabled: boolean
   depth_polling_interval: number
   depth_finalize_time: { hour: number; minute: number }
+  review_schedule: { enabled: boolean; hour: number; minute: number }
   sse_refresh_pages: Record<string, boolean>
   strategy_monitor_enabled: boolean
   strategy_monitor_ids: string[]
   system_notify_enabled: boolean
+  feishu_webhook_url?: string
+  feishu_webhook_secret?: string
+  webhook_enabled_default?: boolean
   sidebar_index_symbols: string[]
   nav_order: string[]
   nav_hidden: string[]
@@ -675,6 +711,27 @@ export interface StrategyAlertEvent {
 // ===== API surface =====
 export const api = {
   health: () => request<{ status: string; version: string; mode: string }>('/health'),
+
+  // ===== Auth (访问认证) =====
+  authStatus: () =>
+    request<{ configured: boolean; authenticated: boolean }>('/api/auth/status'),
+  authSetup: (password: string) =>
+    request<{ ok: boolean }>('/api/auth/setup', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
+  authLogin: (password: string) =>
+    request<{ ok: boolean }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
+  authLogout: () =>
+    request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
+  authChangePassword: (oldPassword: string, newPassword: string) =>
+    request<{ ok: boolean }>('/api/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+    }),
 
   settings: () => request<SettingsState>('/api/settings'),
   saveTickflowKey: (api_key: string) =>
@@ -708,10 +765,29 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ minute_sync_enabled: enabled, minute_sync_days: days }),
     }),
+  updatePipelinePullTypes: (cfg: Partial<Pick<Preferences, 'pipeline_pull_a_share' | 'pipeline_pull_etf' | 'pipeline_pull_index'>>) =>
+    request<{
+      pipeline_pull_a_share: boolean
+      pipeline_pull_etf: boolean
+      pipeline_pull_index: boolean
+    }>('/api/settings/preferences/pipeline-pull-types', {
+      method: 'PUT',
+      body: JSON.stringify(cfg),
+    }),
+  updatePipelineIndexSymbols: (symbols: string) =>
+    request<{ pipeline_index_symbols: string }>('/api/settings/preferences/pipeline-index-symbols', {
+      method: 'PUT',
+      body: JSON.stringify({ symbols }),
+    }),
   updateRealtimeQuotes: (enabled: boolean) =>
-    request<{ realtime_quotes_enabled: boolean }>('/api/settings/preferences/realtime-quotes', {
+    request<{ realtime_quotes_enabled: boolean; realtime_allowed?: boolean; mode?: string; error?: string }>('/api/settings/preferences/realtime-quotes', {
       method: 'PUT',
       body: JSON.stringify({ realtime_quotes_enabled: enabled }),
+    }),
+  updateRealtimeQuoteScope: (cfg: Partial<Pick<Preferences, 'realtime_pull_stock' | 'realtime_pull_etf' | 'realtime_pull_index' | 'realtime_index_mode' | 'realtime_index_symbols'>>) =>
+    request<Partial<Preferences>>('/api/settings/preferences/realtime-quote-scope', {
+      method: 'PUT',
+      body: JSON.stringify(cfg),
     }),
   updateIndicesNavPinned: (pinned: boolean) =>
     request<{ indices_nav_pinned: boolean }>('/api/settings/preferences/indices-nav-pinned', {
@@ -722,9 +798,13 @@ export const api = {
     request<{
       enabled: boolean
       running: boolean
+      mode?: 'none' | 'watchlist' | 'full_market'
+      realtime_allowed?: boolean
       interval_s: number
       symbol_count: number
+      watchlist_symbol_count?: number
       index_symbol_count?: number
+      etf_symbol_count?: number
       quote_age_ms: number | null
       is_trading_hours: boolean
       last_fetch_ms: number | null
@@ -765,10 +845,25 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ enabled }),
     }),
+  updateFeishuWebhook: (url: string, secret: string = '') =>
+    request<{ feishu_webhook_url: string; feishu_webhook_secret: string }>('/api/settings/preferences/feishu-webhook', {
+      method: 'PUT',
+      body: JSON.stringify({ url, secret }),
+    }),
+  updateWebhookDefault: (enabled: boolean) =>
+    request<{ webhook_enabled_default: boolean }>('/api/settings/preferences/webhook-enabled-default', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    }),
   updatePipelineSchedule: (hour: number, minute: number) =>
     request<{ hour: number; minute: number }>('/api/settings/preferences/pipeline-schedule', {
       method: 'PUT',
       body: JSON.stringify({ hour, minute }),
+    }),
+  updateReviewSchedule: (enabled: boolean, hour: number, minute: number) =>
+    request<{ enabled: boolean; hour: number; minute: number }>('/api/settings/preferences/review-schedule', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled, hour, minute }),
     }),
   updateDepthPollingInterval: (interval: number) =>
     request<{ depth_polling_interval: number }>('/api/settings/preferences/depth-polling-interval', {
@@ -950,6 +1045,11 @@ export const api = {
     request<{ symbols: WatchlistEntry[] }>(
       `/api/watchlist/${encodeURIComponent(symbol)}`,
       { method: 'DELETE' },
+    ),
+  watchlistMoveToTop: (symbol: string) =>
+    request<{ symbols: WatchlistEntry[] }>(
+      `/api/watchlist/${encodeURIComponent(symbol)}/top`,
+      { method: 'POST' },
     ),
   watchlistClear: () =>
     request<{ removed: number }>('/api/watchlist', { method: 'DELETE' }),
@@ -1187,6 +1287,13 @@ export const api = {
       { method: 'POST' },
     ),
 
+  // 内置预设 (概念/行业) 手动获取数据: 走结构转换, 保证 schema 一致
+  extDataPresetFetch: (id: string) =>
+    request<{ status: string; rows: number }>(
+      `/api/ext-data/presets/${id}/fetch`,
+      { method: 'POST' },
+    ),
+
   extDataDetectFields: (file: File) => {
     const fd = new FormData()
     fd.append('file', file)
@@ -1342,6 +1449,68 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ symbol, focus: focus ?? '' }),
+    })
+    if (!res.ok) {
+      let detail = ''
+      try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
+      const msg = detail || `${res.status} ${res.statusText}`
+      toast(msg, 'error')
+      throw new Error(msg)
+    }
+    if (!res.body) throw new Error('响应无 body')
+
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      const lines = buf.split('\n')
+      buf = lines.pop() ?? ''
+      for (const line of lines) {
+        const s = line.trim()
+        if (!s) continue
+        try { yield JSON.parse(s) } catch { /* ignore */ }
+      }
+    }
+    if (buf.trim()) {
+      try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
+    }
+  },
+
+  // ===== 大盘复盘 =====
+  reviewReportsList: () =>
+    request<{ reports: AiReviewReport[] }>('/api/market-recap/reports'),
+
+  reviewReportSave: (r: {
+    as_of: string; focus?: string; content: string
+    summary?: string; emotion_score?: number | null; emotion_label?: string
+  }) =>
+    request<{ ok: boolean; report: AiReviewReport }>('/api/market-recap/reports', {
+      method: 'POST', body: JSON.stringify(r),
+    }),
+
+  reviewReportDelete: (reportId: string) =>
+    request<{ ok: boolean }>(`/api/market-recap/reports/${encodeURIComponent(reportId)}`, { method: 'DELETE' }),
+
+  /**
+   * AI 大盘复盘 — 流式调用(NDJSON,与个股/财务分析同协议)。
+   * meta 里带 as_of / emotion_score / emotion_label / summary,供前端先渲染信号灯。
+   */
+  async *reviewStream(asOf?: string, focus?: string): AsyncGenerator<{
+    type: 'meta' | 'delta' | 'error' | 'done'
+    as_of?: string
+    emotion_score?: number
+    emotion_label?: string
+    summary?: string
+    content?: string
+    message?: string
+  }> {
+    const res = await fetch('/api/market-recap/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ as_of: asOf ?? null, focus: focus ?? '' }),
     })
     if (!res.ok) {
       let detail = ''
@@ -1540,6 +1709,9 @@ export interface DataStatus {
   index_daily: TableStats | null
   index_enriched: TableStats | null
   index_instruments: InstrumentsStats | null
+  etf_daily: TableStats | null
+  etf_enriched: TableStats | null
+  etf_instruments: InstrumentsStats | null
   minute: TableStats | null
   adj_factor: TableStats | null
   instruments: InstrumentsStats | null
@@ -1555,6 +1727,14 @@ export interface DataStatus {
     index_enriched_size_mb?: number
     index_instruments_files?: number
     index_instruments_size_mb?: number
+    etf_daily_files?: number
+    etf_daily_size_mb?: number
+    etf_enriched_files?: number
+    etf_enriched_size_mb?: number
+    etf_instruments_files?: number
+    etf_instruments_size_mb?: number
+    etf_adj_factor_files?: number
+    etf_adj_factor_size_mb?: number
     minute_files: number
     minute_size_mb: number
     adj_factor_files: number

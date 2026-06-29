@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 import time
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app import secrets_store
@@ -287,6 +287,16 @@ def get_preferences() -> dict:
         "indices_nav_pinned": preferences.get_indices_nav_pinned(),
         "minute_sync_enabled": preferences.get_minute_sync_enabled(),
         "minute_sync_days": preferences.get_minute_sync_days(),
+        "daily_data_provider": preferences.get_daily_data_provider(),
+        "adj_factor_provider": preferences.get_adj_factor_provider(),
+        "minute_data_provider": preferences.get_minute_data_provider(),
+        "realtime_data_provider": preferences.get_realtime_data_provider(),
+        "realtime_watchlist_symbols": preferences.get_realtime_watchlist_symbols(),
+        **preferences.get_realtime_quote_scope(),
+        "pipeline_pull_a_share": preferences.get_pipeline_pull_a_share(),
+        "pipeline_pull_etf": preferences.get_pipeline_pull_etf(),
+        "pipeline_pull_index": preferences.get_pipeline_pull_index(),
+        "pipeline_index_symbols": preferences.get_pipeline_index_symbols(),
         "pipeline_schedule": preferences.get_pipeline_schedule(),
         "instruments_schedule": preferences.get_instruments_schedule(),
         "enriched_batch_size": preferences.get_enriched_batch_size(),
@@ -297,6 +307,9 @@ def get_preferences() -> dict:
         "strategy_monitor_enabled": preferences.get_strategy_monitor_enabled(),
         "strategy_monitor_ids": preferences.get_strategy_monitor_ids(),
         "system_notify_enabled": preferences.get_system_notify_enabled(),
+        "feishu_webhook_url": preferences.get_feishu_webhook_url(),
+        "feishu_webhook_secret": preferences.get_feishu_webhook_secret(),
+        "webhook_enabled_default": preferences.get_webhook_enabled_default(),
         "sidebar_index_symbols": preferences.get_sidebar_index_symbols(),
         "nav_order": preferences.get_nav_order(),
         "nav_hidden": preferences.get_nav_hidden(),
@@ -304,6 +317,7 @@ def get_preferences() -> dict:
         "limit_ladder_monitor_enabled": preferences.get_limit_ladder_monitor_enabled(),
         "depth_polling_interval": preferences.get_depth_polling_interval(),
         "depth_finalize_time": preferences.get_depth_finalize_time(),
+        "review_schedule": preferences.get_review_schedule(),
     }
 
 
@@ -384,11 +398,19 @@ class RealtimeQuotesPrefs(BaseModel):
     realtime_quotes_enabled: bool
 
 
+class RealtimeQuoteScopePrefs(BaseModel):
+    realtime_pull_stock: bool | None = None
+    realtime_pull_etf: bool | None = None
+    realtime_pull_index: bool | None = None
+    realtime_index_mode: str | None = None
+    realtime_index_symbols: list[str] | None = None
+
+
 @router.put("/preferences/realtime-quotes")
 def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
     """保存全局实时行情开关。
 
-    none/free 档无实时行情权限:拒绝开启,persist 为关闭并返回 allowed=False,
+    none 档无实时行情权限；free 档开启自选股实时；starter+ 开启全市场实时。
     前端据此把开关置灰 / 回弹。
     """
     from app.services import preferences
@@ -401,6 +423,9 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
         if qs:
             qs.disable()
         return {"realtime_quotes_enabled": False, "realtime_allowed": False}
+    if req.realtime_quotes_enabled and qs and qs.realtime_mode() == "watchlist" and not preferences.get_realtime_watchlist_symbols():
+        preferences.save({"realtime_quotes_enabled": False})
+        return {"realtime_quotes_enabled": False, "realtime_allowed": True, "mode": "watchlist", "error": "watchlist_empty"}
 
     preferences.save({"realtime_quotes_enabled": req.realtime_quotes_enabled})
     if qs:
@@ -410,6 +435,26 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
             qs.disable()
 
     return {"realtime_quotes_enabled": req.realtime_quotes_enabled, "realtime_allowed": allowed}
+
+
+@router.put("/preferences/realtime-quote-scope")
+def update_realtime_quote_scope(req: RealtimeQuoteScopePrefs) -> dict:
+    """保存盘中实时行情范围；独立于盘后管道范围。"""
+    from app.services import preferences
+    cfg = req.model_dump(exclude_none=True)
+    return preferences.set_realtime_quote_scope(cfg)
+
+
+class RealtimeWatchlistPrefs(BaseModel):
+    symbols: list[str] = []
+
+
+@router.put("/preferences/realtime-watchlist")
+def update_realtime_watchlist(req: RealtimeWatchlistPrefs) -> dict:
+    """兼容旧入口；Free 实时标的由自选页前 5 个决定。"""
+    from app.services import preferences
+    symbols = preferences.set_realtime_watchlist_symbols(req.symbols)
+    return {"realtime_watchlist_symbols": symbols}
 
 
 class IndicesNavPinnedPrefs(BaseModel):
@@ -464,6 +509,34 @@ def update_realtime_monitor_config(req: RealtimeMonitorConfigIn, request: Reques
     return result
 
 
+class PipelinePullTypesIn(BaseModel):
+    """盘后管道拉取内容开关(A股 / ETF / 指数 独立控制)。"""
+    pipeline_pull_a_share: bool | None = None
+    pipeline_pull_etf: bool | None = None
+    pipeline_pull_index: bool | None = None
+
+
+@router.put("/preferences/pipeline-pull-types")
+def update_pipeline_pull_types(req: PipelinePullTypesIn) -> dict:
+    """更新盘后管道拉取内容开关。"""
+    from app.services import preferences
+    cfg = req.model_dump(exclude_none=True)
+    return preferences.set_pipeline_pull_types(cfg)
+
+
+class PipelineIndexSymbolsIn(BaseModel):
+    """指数自定义拉取代码(逗号/换行/空格分隔,空串表示全量)。"""
+    symbols: str = ""
+
+
+@router.put("/preferences/pipeline-index-symbols")
+def update_pipeline_index_symbols(req: PipelineIndexSymbolsIn) -> dict:
+    """保存指数自定义拉取代码。"""
+    from app.services import preferences
+    symbols = preferences.set_pipeline_index_symbols(req.symbols)
+    return {"pipeline_index_symbols": symbols}
+
+
 class QuoteIntervalIn(BaseModel):
     interval: float
 
@@ -482,6 +555,50 @@ def update_system_notify(req: SystemNotifyPrefsIn) -> dict:
     from app.services import preferences
     saved = preferences.set_system_notify_enabled(req.enabled)
     return {"system_notify_enabled": saved}
+
+
+class FeishuWebhookPrefsIn(BaseModel):
+    url: str
+    secret: str = ""
+
+
+@router.put("/preferences/feishu-webhook")
+def update_feishu_webhook(req: FeishuWebhookPrefsIn) -> dict:
+    """飞书 Webhook 地址 + 签名密钥 — 全局一处配置, 所有启用推送的监控规则共用。
+
+    - url: 传入空串表示清空配置; 非空则需为合法的飞书自定义机器人地址。
+    - secret: 机器人启用了「签名校验」时填密钥, 留空表示不验签。
+    """
+    from app.services import preferences
+    from app.services import webhook_adapter
+
+    url = (req.url or "").strip()
+    if url and not webhook_adapter.is_valid_feishu_url(url):
+        raise HTTPException(
+            status_code=400,
+            detail="Webhook 地址非法, 需为飞书自定义机器人地址 "
+                   "(https://open.feishu.cn/open-apis/bot/v2/hook/...)",
+        )
+    saved_url = preferences.set_feishu_webhook_url(url)
+    saved_secret = preferences.set_feishu_webhook_secret((req.secret or "").strip())
+    return {"feishu_webhook_url": saved_url, "feishu_webhook_secret": saved_secret}
+
+
+class WebhookEnabledDefaultIn(BaseModel):
+    enabled: bool
+
+
+@router.put("/preferences/webhook-enabled-default")
+def update_webhook_enabled_default(req: WebhookEnabledDefaultIn) -> dict:
+    """新建监控规则时是否默认勾选「飞书推送」。
+
+    数据模型当前只有飞书一个可用渠道 (QMT/ptrade 待定),故此处仅一个布尔。
+    单条规则仍可在规则编辑页独立修改此项。
+    """
+    from app.services import preferences
+
+    saved = preferences.set_webhook_enabled_default(req.enabled)
+    return {"webhook_enabled_default": saved}
 
 
 @router.put("/preferences/quote-interval")
@@ -856,6 +973,51 @@ def update_depth_finalize_time(req: DepthFinalizeTimeIn, request: Request) -> di
             ),
         )
         logger.info("depth_finalize rescheduled to %02d:%02d mon-fri", sched["hour"], sched["minute"])
+
+    return sched
+
+
+class ReviewScheduleIn(BaseModel):
+    enabled: bool
+    hour: int
+    minute: int
+
+
+@router.put("/preferences/review-schedule")
+def update_review_schedule(req: ReviewScheduleIn, request: Request) -> dict:
+    """保存定时复盘调度并立即更新 APScheduler job。
+
+    - enabled=True: 注册/更新 job(工作日定时生成复盘报告)
+    - enabled=False: 移除 job(停止定时复盘)
+    - 校验: 开启时若 AI Key 未配置则拒绝(复盘依赖 AI), 提示用户先配置。
+    - 时间下限 15:30(盘后数据就绪), 由 preferences 层强制。
+    """
+    from app.services import preferences
+
+    if req.enabled:
+        # 复盘必须有 AI Key, 否则每日报错刷日志
+        from app import secrets_store
+        if not secrets_store.get_ai_key():
+            raise HTTPException(
+                status_code=400,
+                detail="复盘依赖 AI,请先在「设置 → AI」配置 API Key 后再开启定时复盘",
+            )
+
+    sched = preferences.set_review_schedule(req.enabled, req.hour, req.minute)
+
+    # 动态操作 APScheduler job
+    from app.jobs.daily_pipeline import _register_review_job, REVIEW_JOB_ID
+    scheduler = getattr(request.app.state, "scheduler", None)
+    if scheduler:
+        if sched["enabled"]:
+            _register_review_job(scheduler, request.app.state.repo, sched["hour"], sched["minute"])
+            logger.info("scheduled_review enabled @%02d:%02d mon-fri", sched["hour"], sched["minute"])
+        else:
+            try:
+                scheduler.remove_job(REVIEW_JOB_ID)
+                logger.info("scheduled_review disabled (job removed)")
+            except Exception:
+                pass  # job 本就不存在(从未开过), 无需处理
 
     return sched
 

@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus } from 'lucide-react'
+import { Trash2, RefreshCw, Star, X, Search, LayoutGrid, List, Settings2, Plus, Check, Filter, Eye, EyeOff, Minus, ChevronsUp } from 'lucide-react'
 import { api, type KlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { storage } from '@/lib/storage'
@@ -16,6 +16,7 @@ import { MiniCandlestick } from '@/components/stock-table/MiniCandlestick'
 import { boardTag, renderBuiltinDataCell } from '@/components/stock-table/primitives'
 import { getSignals, signalCls, getSortValue, UNSORTABLE_KEYS } from '@/lib/stock-table'
 import { resolveCandleConfig } from '@/lib/list-columns'
+import { useQuoteStatus } from '@/lib/useSharedQueries'
 import {
   type ColumnConfig,
   BUILTIN_COLUMNS,
@@ -295,6 +296,27 @@ function StockSearchBox({
   )
 }
 
+// ===== 实时监控圆点 =====
+// 自选页 symbol 列代码后的小圆点, 标识该标的正在被实时行情监控 (Free/低档按自选监控模式)。
+// 视觉: 内圈实心点 + 外圈 animate-ping 扩散晕, 语义=「在线/活动」。
+// 配色用 accent (电光蓝) 而非绿/红: 项目设计规范规定红绿仅用于价格/K线,
+// UI 状态用 accent, 避免与 A 股涨跌色混淆。
+// 全市场模式 (Starter+) 不显示 —— 全部都在监控, 标记无信息量。
+function RealtimeDot({ title = '实时监控中' }: { title?: string }) {
+  return (
+    <span
+      title={title}
+      className="relative inline-flex h-2 w-2 shrink-0"
+      aria-label={title}
+    >
+      {/* 外圈: 扩散晕 (ping 动画) */}
+      <span className="absolute inline-flex h-full w-full rounded-full bg-accent/60 animate-ping motion-reduce:hidden" />
+      {/* 内圈: 实心点 + 微辉光 */}
+      <span className="relative inline-flex rounded-full h-2 w-2 bg-accent shadow-[0_0_5px_rgba(61,214,140,0.6)]" />
+    </span>
+  )
+}
+
 // ===== 卡片组件 =====
 
 function StockCard({
@@ -309,6 +331,7 @@ function StockCard({
   extCols,
   expandedCells,
   onToggleExpand,
+  isMonitored,
 }: {
   r: any
   candleRows: KlineRow[]
@@ -321,6 +344,7 @@ function StockCard({
   extCols: ColumnConfig[]
   expandedCells: Set<string>
   onToggleExpand: (key: string) => void
+  isMonitored?: boolean
 }) {
   const board = boardTag(r.symbol)
   const price = r.rt_price ?? r.close
@@ -394,6 +418,7 @@ function StockCard({
               {r.consecutive_limit_ups === 1 ? '首板' : `${r.consecutive_limit_ups}连`}
             </span>
           )}
+          {isMonitored && <span className="ml-auto"><RealtimeDot /></span>}
         </div>
 
         {/* 第二行: 大价格 + 涨跌幅胶囊 */}
@@ -591,6 +616,18 @@ export function Watchlist() {
     },
   })
 
+  const moveToTop = useMutation({
+    mutationFn: (sym: string) => api.watchlistMoveToTop(sym),
+    onSuccess: (data) => {
+      qc.setQueryData(QK.watchlist, data)
+      qc.invalidateQueries({ queryKey: QK.watchlist })
+      qc.invalidateQueries({ queryKey: ['watchlist-enriched'] })
+      qc.invalidateQueries({ queryKey: ['watchlist-kline-batch'] })
+      qc.invalidateQueries({ queryKey: QK.preferences })
+      qc.invalidateQueries({ queryKey: QK.quoteStatus })
+    },
+  })
+
   const clearAll = useMutation({
     mutationFn: () => api.watchlistClear(),
     onSuccess: () => {
@@ -609,6 +646,20 @@ export function Watchlist() {
 
   const allSymbols = list.data?.symbols?.map(s => s.symbol) ?? []
   const rows = enriched.data?.rows ?? []
+
+  // 实时监控圆点: 仅 Free/低档 "按自选股实时监控" 模式 (mode === 'watchlist') 下显示;
+  // Starter+ 全市场模式 (mode === 'full_market') 全部标的都在监控, 标圆点无意义, 故不显示。
+  // 后端 Free 档实际只监控自选页前 N 个 (N = watchlist_symbol_count), 顺序与 allSymbols 一致。
+  const quoteStatus = useQuoteStatus()
+  const realtimeRunning = quoteStatus.data?.running ?? false
+  const realtimeMode = quoteStatus.data?.mode
+  const watchlistMonitoredCount = quoteStatus.data?.watchlist_symbol_count ?? 0
+  const showRealtimeDot = realtimeRunning && realtimeMode === 'watchlist'
+  // 真正被监控的标的集合 (自选列表前 watchlistMonitoredCount 个)
+  const monitoredSymbols = useMemo(
+    () => showRealtimeDot ? new Set(allSymbols.slice(0, watchlistMonitoredCount)) : new Set<string>(),
+    [showRealtimeDot, allSymbols, watchlistMonitoredCount],
+  )
 
   // ===== 筛选 =====
   const [filterOpen, setFilterOpen] = useState(false)
@@ -934,6 +985,7 @@ export function Watchlist() {
                               {board.label}
                             </span>
                           ) : null}
+                          {monitoredSymbols.has(r.symbol) && <span className="ml-2"><RealtimeDot /></span>}
                         </button>
                         {/* 删除入口：默认减号图标，二次确认时替换为确定按钮 */}
                         <div className="ml-auto pl-1 shrink-0">
@@ -953,13 +1005,25 @@ export function Watchlist() {
                               </button>
                             </div>
                           ) : (
-                            <button
-                              onClick={() => setConfirmRemove(r.symbol)}
-                              className="p-0.5 text-muted hover:text-danger transition-colors duration-150 ease-smooth"
-                              aria-label="移除"
-                            >
-                              <Minus className="h-3.5 w-3.5" />
-                            </button>
+                            <div className="flex items-center gap-1">
+                              <button
+                                onClick={() => setConfirmRemove(r.symbol)}
+                                className="p-0.5 text-muted hover:text-danger transition-colors duration-150 ease-smooth"
+                                aria-label="移除"
+                                title="移除"
+                              >
+                                <Minus className="h-3.5 w-3.5" />
+                              </button>
+                              <button
+                                onClick={() => moveToTop.mutate(r.symbol)}
+                                disabled={moveToTop.isPending || allSymbols[0] === r.symbol}
+                                className="p-0.5 text-muted hover:text-accent transition-colors duration-150 ease-smooth disabled:opacity-30 disabled:hover:text-muted"
+                                aria-label="移到顶部"
+                                title="移到顶部"
+                              >
+                                <ChevronsUp className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
                           )}
                         </div>
                       </div>
@@ -1032,6 +1096,7 @@ export function Watchlist() {
                   extCols={visibleExtCols}
                   expandedCells={expandedCells}
                   onToggleExpand={handleToggleExpand}
+                  isMonitored={monitoredSymbols.has(r.symbol)}
                 />
               ))}
             </div>

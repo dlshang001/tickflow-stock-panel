@@ -11,7 +11,9 @@
 ;
 ; 设计决策:
 ;   - 装到用户目录 {localappdata}\Programs\ (不弹 UAC, 不需管理员)
-;   - 卸载时询问是否删除用户数据 (%LOCALAPPDATA%\TickFlowStockPanel\)
+;   - 用户数据存在 {app}\data\ (与程序同处一个总目录, 视觉直观)
+;   - 卸载时询问是否删除用户数据 ({app}\data\)
+;   - 覆盖安装(升级)不动 data\: Inno Setup 只写程序文件, data 不在安装清单
 ;   - 桌面 + 开始菜单快捷方式
 ;   - 卸载入口 (控制面板可见)
 ; ===========================================================================
@@ -93,11 +95,36 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}
 ; 卸载前先关闭正在运行的应用 (否则 exe 被占用删不掉)
 Filename: "{cmd}"; Parameters: "/C taskkill /F /IM {#MyAppExeName}"; Flags: runhidden; RunOnceId: "KillApp"
 
-[UninstallDelete]
-; 清理安装目录下的残留 (日志等)
-Type: filesandordirs; Name: "{app}"
+; [UninstallDelete] 故意不删 {app}:
+; 用户数据在 {app}\data\, 若这里写 Type: filesandordirs; Name: "{app}" 会连数据一起删。
+; 卸载默认行为已足够 —— Inno Setup 会删除它安装清单内的所有程序文件, 只留下运行时
+; 生成的 data\ 目录。是否清理 data\ 由下方 [Code] 的卸载询问逻辑决定。
 
 [Code]
+// ── 辅助函数: 判断目录是否为空 ─────────────────────────────────
+// Inno Setup 内置无 IsDirEmpty, 用 FindFirst/FindNext 自行实现。
+// 用于卸载后清理空的 {app} 壳目录。
+function IsDirEmpty(const Dir: String): Boolean;
+var
+  FindRec: TFindRec;
+begin
+  Result := True;
+  if FindFirst(AddBackslash(Dir) + '*', FindRec) then
+  begin
+    try
+      repeat
+        if (FindRec.Name <> '.') and (FindRec.Name <> '..') then
+        begin
+          Result := False;
+          Break;
+        end;
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+end;
+
 // ── 启动时: 若 D 盘不存在, 回退默认路径到用户目录 ───────────────
 // 避免默认 D:\... 但系统没 D 盘时向导显示无效路径
 function InitializeSetup(): Boolean;
@@ -118,26 +145,34 @@ begin
 end;
 
 // ── 卸载时询问是否删除用户数据 ─────────────────────────────────
-// 用户数据在 %LOCALAPPDATA%\TickFlowStockPanel\ (策略/选股/回测/监控)
-// 默认保留 (重装不丢), 但给用户彻底清除的选项
+// 用户数据在 {app}\data\ (策略/选股/回测/监控/行情), 与程序同处 {app} 总目录。
+// Inno Setup 卸载默认只删它装过的程序文件, data\ 会被保留 (覆盖安装/常规卸载都不丢)。
+// 这里仅在用户明确「彻底卸载」时, 才询问是否清理 data\ + {app} 空壳。
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
-  DataDir: String;
+  DataDir, AppDir: String;
 begin
   if CurUninstallStep = usPostUninstall then
   begin
-    DataDir := ExpandConstant('{localappdata}\TickFlowStockPanel');
+    // {app}\data = 用户数据目录 (与程序同总目录, 子文件夹)
+    DataDir := ExpandConstant('{app}\data');
     if DirExists(DataDir) then
     begin
       if SuppressibleMsgBox(
           '是否同时删除用户数据?' + #13#10 + #13#10 +
           '位置: ' + DataDir + #13#10 +
-          '内容: 策略、选股结果、回测记录、监控规则等' + #13#10 + #13#10 +
+          '内容: 行情数据、策略、选股结果、回测记录、监控规则等' + #13#10 + #13#10 +
           '选「是」彻底卸载, 选「否」保留数据(重装后可恢复)。',
           mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES then
       begin
         DelTree(DataDir, True, True, True);
       end;
+    end;
+    // 清理可能残留的空 {app} 壳目录 (程序文件已被 Inno Setup 删除)
+    AppDir := ExpandConstant('{app}');
+    if DirExists(AppDir) and IsDirEmpty(AppDir) then
+    begin
+      DelTree(AppDir, True, True, True);
     end;
   end;
 end;

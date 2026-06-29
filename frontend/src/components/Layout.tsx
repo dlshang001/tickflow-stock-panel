@@ -29,7 +29,6 @@ import {
   Settings,
   Key,
   Database,
-  Timer,
   Loader2,
   LayoutDashboard,
   Tags,
@@ -42,10 +41,13 @@ import {
   Cable,
   RadioTower,
   CheckCircle2,
+  BookOpenCheck,
+  ExternalLink,
   Sun,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
+  Timer,
 } from 'lucide-react'
 import { Logo } from './Logo'
 import { useTheme } from '@/lib/theme'
@@ -55,6 +57,7 @@ import { setCurrentTotal as setAlertTotal, useUnreadAlerts } from '@/lib/monitor
 
 // 品牌色 — 只用于 logo / brand 区域,不影响功能语义色
 const BRAND = '#8B5CF6'
+const TICKFLOW_REGISTER_URL = 'https://tickflow.org/auth/register?ref=V3KDKGXPEA'
 
 const CORE_INDEXES = [
   { symbol: '000001.SH', name: '上证指数' },
@@ -70,14 +73,15 @@ const nav = [
   { to: '/watchlist',  label: '自选',   icon: Star },
   { to: '/screener',   label: '策略',   icon: ScanSearch },
   { to: '/backtest',   label: '回测',   icon: History },
+  { to: '/stock-analysis',    label: '个股分析', icon: TrendingUp },
   { to: '/limit-ladder', label: '连板梯队', icon: Flame },
   { to: '/concept-analysis', label: '概念分析', icon: Layers3 },
   { to: '/industry-analysis', label: '行业分析', icon: Landmark },
-  { to: '/stock-analysis',    label: '个股分析', icon: TrendingUp },
   { to: '/financials', label: '财务分析', icon: FileText },
+  { to: '/monitor', label: '监控中心', icon: RadioTower },
+  { to: '/review',      label: '复盘',   icon: BookOpenCheck },
   { to: '/indices', label: '指数', icon: BarChart3 },
   { to: '/trading', label: '交易', icon: Cable },
-  { to: '/monitor', label: '监控中心', icon: RadioTower },
   { to: '/data',       label: '数据',   icon: Database },
 ] as const
 
@@ -161,7 +165,7 @@ function TierBadge({ label, hasKey }: { label: string; hasKey?: boolean }) {
       labelTextStyle: { color: '#71717a' },
     },
     free: {
-      desc: '基础日K · 单股查询',
+      desc: '基础日K · 自选实时',
       tagBg: { background: 'rgba(113,113,122,0.3)' },
       dotStyle: { background: '#71717a' },
       labelTextStyle: { color: '#a1a1aa' },
@@ -187,8 +191,8 @@ function TierBadge({ label, hasKey }: { label: string; hasKey?: boolean }) {
   }
 
   const t = tierConfig[base] || tierConfig.none
-  // none 档显示中文「无」,无 label 时显示「无档」
-  const displayLabel = isNone ? '无' : (label || '无')
+  // none 档显示英文「None」,无 label 时也显示「None」
+  const displayLabel = isNone ? 'None' : (label || 'None')
 
   return (
     <NavLink
@@ -329,8 +333,10 @@ export function Layout() {
   const toggleQuote = useToggleRealtimeQuotes()
   const isRunning = quoteStatus?.running ?? false
   const isTrading = quoteStatus?.is_trading_hours ?? false
-  // none/free 档(无实时行情权限)→ rank < starter(1)
-  const isFreeTier = tierRank(caps?.label ?? '') < 1
+  const tier = tierRank(caps?.label ?? '')
+  const isNoneTier = tier < 0
+  const isWatchlistMode = tier === 0
+  const realtimeModeLabel = isWatchlistMode ? '自选股' : '全市场'
 
   // 轮询触发记录总数 → 更新监控中心徽标 (每 15 秒)
   const alertsTotalQuery = useQuery({
@@ -375,7 +381,12 @@ export function Layout() {
         queryKey: QK.capabilities,
         queryFn: api.capabilities,
       })
-      if (tierRank(fresh.label ?? '') < 1) return
+      const freshTier = tierRank(fresh.label ?? '')
+      if (freshTier < 0) return
+      if (freshTier === 0 && (prefs?.realtime_watchlist_symbols?.length ?? 0) === 0) {
+        navigate('/watchlist')
+        return
+      }
     }
     await toggleQuote.mutateAsync(enabled)
     // 仅在交易时段立即获取一次行情
@@ -411,7 +422,7 @@ export function Layout() {
           })}
         <div className="flex-1" />
         {/* 实时行情指示灯 */}
-        {!isFreeTier && (
+        {!isNoneTier && (
           <div className="flex items-center gap-1.5 shrink-0">
             <span className={`inline-block h-1.5 w-1.5 rounded-full ${
               realtimeEnabled && isRunning && isTrading
@@ -566,7 +577,7 @@ export function Layout() {
                   <Icon className="h-4 w-4 shrink-0" />
                   <span className="flex-1">{label}</span>
                   {/* 个股分析 Beta 标识 */}
-                  {to === '/stock-analysis' && (
+                  {(to === '/stock-analysis' || to === '/review') && (
                     <span className="inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-400 shrink-0">
                       Beta
                     </span>
@@ -586,86 +597,137 @@ export function Layout() {
           ))}
         </nav>
 
-              {/* 展开模式: 底部控件 */}
-              <div className="border-t border-border px-3 py-2.5 space-y-2 shrink-0">
-                {!isFreeTier && (
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <span className="text-[11px] text-secondary">实时行情</span>
-                      <button
-                        onClick={() => navigate('/settings?tab=monitoring')}
-                        className="text-muted hover:text-foreground transition-colors shrink-0"
-                        title="实时监控设置"
-                      >
-                        <Timer className="h-3 w-3" />
-                      </button>
-                    </div>
-                    <button
-                      onClick={() => handleToggle(!realtimeEnabled)}
-                      disabled={toggleQuote.isPending}
-                      className={`relative inline-flex h-4 w-7 items-center rounded-full shrink-0 transition-colors duration-200 ${
-                        realtimeEnabled
-                          ? 'bg-accent shadow-[0_0_6px_rgba(59,130,246,0.3)]'
-                          : 'bg-elevated border border-border'
-                      } ${toggleQuote.isPending ? 'opacity-50' : 'cursor-pointer'}`}
-                    >
-                      <span className={`inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform duration-200 ${
-                        realtimeEnabled ? 'translate-x-[14px]' : 'translate-x-0.5'
-                      }`} />
-                    </button>
-                  </div>
-                )}
-
-                {/* 主题切换 */}
-                <div className="flex items-center justify-between">
-                  <span className="text-[11px] text-secondary">
-                    {theme === 'dark' ? '深色' : '浅色'}
-                  </span>
-                  <button
-                    onClick={toggleTheme}
-                    className="relative inline-flex h-5 w-9 items-center rounded-full shrink-0 transition-all duration-300 bg-elevated border border-border hover:border-accent/30"
-                    title={theme === 'dark' ? '切换浅色' : '切换深色'}
-                  >
-                    <span
-                      className={`inline-flex h-4 w-4 items-center justify-center rounded-full shadow-sm transition-all duration-300 ${
-                        theme === 'dark'
-                          ? 'translate-x-[16px] bg-accent text-white'
-                          : 'translate-x-0.5 bg-warning/80 text-white'
-                      }`}
-                    >
-                      {theme === 'dark' ? (
-                        <Moon className="h-2.5 w-2.5" />
-                      ) : (
-                        <Sun className="h-2.5 w-2.5" />
-                      )}
-                    </span>
-                  </button>
-                </div>
-
-                {/* 设置 */}
-                <NavLink
-                  to="/settings"
-                  className={({ isActive }) =>
-                    cn(
-                      'flex items-center justify-between gap-3 px-2 py-1.5 rounded-btn text-sm transition-colors duration-150 ease-smooth',
-                      isActive
-                        ? 'bg-accent/10 text-accent font-medium'
-                        : 'text-secondary hover:text-foreground',
-                    )
-                  }
-                >
-                  <span className="flex items-center gap-2.5">
-                    <Settings className="h-3.5 w-3.5 shrink-0" />
-                    <span>设置</span>
-                  </span>
-                  <span className="font-mono text-[10px] text-muted/50 select-none">
-                    {version ?? ''}
-                  </span>
-                </NavLink>
+        {/* 全局行情开关 */}
+        <div className="border-t border-border px-3 py-2.5 shrink-0">
+          {isNoneTier ? (
+            /* None 档位 — 显示注册引导 */
+            <div>
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-secondary truncate">实时行情</span>
+                <span className="text-[10px] text-accent/70 font-medium bg-accent/10 px-1.5 py-0.5 rounded">
+                  Free+
+                </span>
               </div>
-            </>
+              <div className="mt-1.5 text-[10px] leading-snug text-muted">
+                免费注册
+                <a
+                  href={TICKFLOW_REGISTER_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mx-1 inline-flex items-baseline gap-0.5 text-accent/80 hover:text-accent hover:underline"
+                >
+                  TickFlow
+                  <ExternalLink className="h-2.5 w-2.5 self-center" />
+                </a>
+                开启个股监控
+              </div>
+            </div>
+          ) : (
+            /* Starter+ — 开关 + 跳转设置 */
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className={`inline-block h-1.5 w-1.5 rounded-full shrink-0 ${
+                  realtimeEnabled && isRunning && isTrading
+                    ? 'bg-accent animate-pulse'
+                    : realtimeEnabled
+                      ? 'bg-warning/60'
+                      : 'bg-muted'
+                }`} />
+                <span className="text-xs text-secondary truncate">
+                  实时行情 · {realtimeModeLabel}
+                </span>
+                <button
+                  onClick={() => navigate('/settings?tab=monitoring')}
+                  className="text-secondary hover:text-foreground transition-colors shrink-0"
+                  title="实时监控设置"
+                >
+                  <Timer className="h-3 w-3" />
+                </button>
+              </div>
+              <button
+                onClick={() => handleToggle(!realtimeEnabled)}
+                disabled={toggleQuote.isPending}
+                className={`relative inline-flex h-4 w-7 items-center rounded-full shrink-0 transition-colors duration-200 ${
+                  realtimeEnabled
+                    ? 'bg-accent shadow-[0_0_6px_rgba(59,130,246,0.3)]'
+                    : 'bg-elevated'
+                } ${toggleQuote.isPending ? 'opacity-50' : 'cursor-pointer'}`}
+              >
+                <span className={`inline-block h-3 w-3 rounded-full bg-white shadow-sm transition-transform duration-200 ${
+                  realtimeEnabled ? 'translate-x-[14px]' : 'translate-x-0.5'
+                }`} />
+              </button>
+            </div>
           )}
-        </aside>
+
+          {/* 状态提示 */}
+          {realtimeEnabled && !isNoneTier && (
+            <div className="mt-1.5 text-[10px] leading-snug">
+              {isRunning && isTrading ? (
+                <span className="text-accent">行情运行中</span>
+              ) : realtimeEnabled && !isTrading ? (
+                <span className="text-warning/70">非交易时段，将在交易时间自动开启</span>
+              ) : null}
+            </div>
+          )}
+          {showSidebarQuotes && !isWatchlistMode && !isNoneTier && (
+            <SidebarIndexQuotes rows={sidebarIndexQuotes?.rows} items={sidebarIndexes} />
+          )}
+        </div>
+
+        {/* 主题切换 */}
+        <div className="border-t border-border px-3 py-2 shrink-0">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-secondary">
+              {theme === 'dark' ? '深色' : '浅色'}
+            </span>
+            <button
+              onClick={toggleTheme}
+              className="relative inline-flex h-5 w-9 items-center rounded-full shrink-0 transition-all duration-300 bg-elevated border border-border hover:border-accent/30"
+              title={theme === 'dark' ? '切换浅色' : '切换深色'}
+            >
+              <span
+                className={`inline-flex h-4 w-4 items-center justify-center rounded-full shadow-sm transition-all duration-300 ${
+                  theme === 'dark'
+                    ? 'translate-x-[16px] bg-accent text-white'
+                    : 'translate-x-0.5 bg-warning/80 text-white'
+                }`}
+              >
+                {theme === 'dark' ? (
+                  <Moon className="h-2.5 w-2.5" />
+                ) : (
+                  <Sun className="h-2.5 w-2.5" />
+                )}
+              </span>
+            </button>
+          </div>
+        </div>
+
+        {/* 设置 */}
+        <div className="border-t border-border px-3 py-2.5 shrink-0">
+          <NavLink
+            to="/settings"
+            className={({ isActive }) =>
+              cn(
+                'flex items-center justify-between gap-3 px-2 py-1.5 rounded-btn text-sm transition-colors duration-150 ease-smooth',
+                isActive
+                  ? 'bg-accent/10 text-accent font-medium'
+                  : 'text-secondary hover:text-foreground',
+              )
+            }
+          >
+            <span className="flex items-center gap-2.5">
+              <Settings className="h-3.5 w-3.5 shrink-0" />
+              <span>设置</span>
+            </span>
+            <span className="font-mono text-[10px] text-muted/50 select-none">
+              {version ?? ''}
+            </span>
+          </NavLink>
+        </div>
+      </>
+    )}
+  </aside>
 
       <motion.main
         initial={{ opacity: 0, y: 8 }}
