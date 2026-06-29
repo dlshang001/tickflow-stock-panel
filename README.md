@@ -9,6 +9,7 @@
 [![React](https://img.shields.io/badge/React-18-61dafb.svg)](https://react.dev/)
 [![Data: TickFlow](https://img.shields.io/badge/Data-TickFlow-00b386.svg)](https://tickflow.org/auth/register?ref=V3KDKGXPEA)
 [![Deploy: Docker](https://img.shields.io/badge/Deploy-Docker-2496ed.svg)](./Dockerfile)
+[![GitHub stars](https://img.shields.io/github/stars/shy3130/tickflow-stock-panel?style=social)](https://github.com/shy3130/tickflow-stock-panel/stargazers)
 
 基于 [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 数据 · 🚀 **开箱即用**(单容器 / Free 模式)
 能力驱动,适配 Free → Expert 全档位订阅 · 🔌 **自由接入第三方扩展数据**(例如 Tushare、自有量化项目数据)
@@ -35,7 +36,7 @@
 | 配置项 | 说明 | 是否必填 |
 | :--- | :--- | :--- |
 | **TickFlow API Key** | 数据源凭证,留空启用 None 模式，获取免费key后开启free模式可定制策略+回测 | 可选 |
-| **AI 大模型 API Key** | 用于 AI 生成策略、个股分析(开发中)、行情分析(开发中)等,任意 OpenAI 兼容接口,留空关闭 | 可选 |
+| **AI 大模型 API Key** | 用于 AI 生成策略、个股分析、财务分析等,任意 OpenAI 兼容接口,留空关闭 | 可选 |
 
 <table>
   <tr>
@@ -143,6 +144,29 @@
 - **沙箱约束**:生成代码经 `ast` 校验、限定 `import polars as pl`,避免逐行循环,优先向量化表达
 - **可插拔**:留空 AI 配置即跳过整个模块,不影响核心功能
 
+### 📈 个股分析(Beta)
+
+**以「行情 + 关键价位」为视觉主体的单标的决策页**,与「财务分析」(财务质量评级)定位互补:
+
+- **专用日 K 图表**:不复用行情浏览图表,主图 + 成交量 + 滑块三段布局,默认展示近 6 个月,9 类关键价位可逐组开关
+- **9 类关键价位**(均纯函数实时计算,毫秒级):
+
+| 类型 | 算法 | 说明 |
+| :--- | :--- | :--- |
+| 压力支撑 | 布林带上下轨 | 近期波动边界 |
+| 成交密集区 | 成交量分布 POC + 高成交带 | 筹码密集价位 |
+| 枢轴点 | 经典 Pivot P/R1~R3/S1~S3 | 可配档位(1~3 档) |
+| 前高前低 | 60/250 日极值 + swing 高低点 | 历史转折参照 |
+| Keltner 通道 | MA20/60/120 ± n×ATR(短/中/长) | 波动自适应趋势边界 |
+| ATR 止损 | close ± 1.5/2×ATR | 动态止盈止损位 |
+| 缺口位 | 近 120 日未回补跳空缺口 | 天然支撑/阻力 |
+| 斐波那契 | 近期波段 0.236~0.786 回撤 | 经典回撤位 |
+| 整数关口 | 当前价附近心理整数位 | 自适应步长 |
+
+- **AI 四维分析**:技术面 / 基本面 / 财务面 / 消息面流式生成,NDJSON 推送,「实战派交易员」视角输出买卖区间与操作建议
+- **蓝色胶囊**:与财务分析(紫色)并存的全局气泡,支持最小化后台生成、复制全文、历史报告(最多 50 条)
+- **记忆最近查看**:进入页面自动回显上次查看的个股
+
 ### 🧰 数据与扩展
 
 - **多源数据**:TickFlow 日 K / 分钟 K / 指数 / 财务(利润 / 资产负债 / 现金流)/ 自选行情
@@ -192,6 +216,22 @@ docker compose up --build
 # 打开 http://localhost:3018
 ```
 
+如果你的 VPS / 物理机 CPU 较老,`docker compose up --build` 时出现类似
+`Missing required CPU features: avx2, fma, bmi1...` 或容器 `exit code 132`,
+先在 `.env` 里打开 Polars 兼容运行时再重建:
+
+```ini
+BACKEND_EXTRAS=legacy-cpu
+# 需要回测可同时启用(空格分隔):BACKEND_EXTRAS=legacy-cpu backtest
+```
+
+```bash
+docker compose up --build
+```
+
+`legacy-cpu` 会让后端安装 `polars[rtcompat]`,适用于不支持 AVX2/FMA 的老 CPU;
+默认留空则保持 Polars 高性能运行时。该 wheel 约 50MB,启用后镜像体积会相应增大。
+
 
 首次运行会自动安装前后端依赖(约 1-2 分钟),之后直接启动:
 
@@ -219,6 +259,9 @@ pnpm dev                   # http://localhost:3011
 
 > **启用回测**:`cd backend && uv sync --extra backtest`
 > vectorbt → numba 体积较大,故作为可选 extras。macOS / Intel 无预构建 wheel 时需 `brew install cmake` 现场编译。
+
+> **老 CPU 兼容**:`cd backend && uv sync --extra legacy-cpu`
+> 当机器缺少 `avx2/fma` 等指令集时,给 Polars 切到 `rtcompat` 运行时。
 
 ---
 
@@ -298,6 +341,7 @@ DATA_DIR=./data       # Parquet / DuckDB 数据存储目录
 | **3** | vectorbt 回测 + T+1 + 手续费 + 止损 + max-hold | ✅ |
 | **4** | 监控引擎 + 告警规则 + Webhook + APScheduler 盘后定时 | ✅ |
 | **5** | 统一监控中心 + 四类监控规则 + 实时推送 + 持久化触发记录 + 声效通知 | ✅ |
+| **6** | 个股分析(专用日 K + 9 类关键价位 + AI 四维分析 + 报告持久化) | ✅ |
 | **v2** | Webhook 推送(QMT/掘金下单) · 板块异动 · 早晚报 · 更多扩展 | 🚧 |
 
 ---

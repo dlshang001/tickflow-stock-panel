@@ -7,6 +7,8 @@ import { ToastContainer } from '@/components/Toast'
 import { AlertToastContainer } from '@/components/AlertToast'
 import { AiAnalysisHost } from '@/components/financials/AiAnalysisHost'
 import { AiReportBubble } from '@/components/financials/AiReportBubble'
+import { StockAnalysisHost } from '@/components/stock-analysis/StockAnalysisHost'
+import { StockAnalysisBubble } from '@/components/stock-analysis/StockAnalysisBubble'
 import {
   useCapabilities,
   useSettings,
@@ -545,37 +547,44 @@ export function Layout() {
                 />
               </div>
 
-              {/* 展开模式: 导航菜单 */}
-              <nav className="flex-1 min-h-0 overflow-y-auto px-2.5 py-2 space-y-0.5">
-                {visibleNavItems.map(({ to, label, icon: Icon }) => (
-                  <NavLink
-                    key={to}
-                    to={to}
-                    className={({ isActive }) =>
-                      cn(
-                        'flex items-center gap-3 px-3 py-2 rounded-btn text-sm transition-all duration-150 ease-smooth',
-                        isActive
-                          ? 'bg-accent/10 text-accent font-medium border-l-[3px] border-accent -ml-[5px] pl-[10px]'
-                          : 'text-secondary hover:bg-elevated hover:text-foreground border-l-[3px] border-transparent -ml-[5px] pl-[10px]',
-                      )
-                    }
-                  >
-                    {({ isActive }) => (
-                      <>
-                        <Icon className={cn('h-4 w-4 shrink-0', isActive && 'text-accent')} />
-                        <span className="flex-1">{label}</span>
-                        {to === '/data' && isDataSyncing && (
-                          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
-                        )}
-                        {to === '/data' && !isDataSyncing && dataSyncJustDone && (
-                          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-bull animate-pulse" />
-                        )}
-                        {to === '/monitor' && <MonitorBadge active={isActive} />}
-                      </>
-                    )}
-                  </NavLink>
-                ))}
-              </nav>
+        <nav className="flex-1 min-h-0 overflow-y-auto px-2 py-3 space-y-0.5">
+          {visibleNavItems.map(({ to, label, icon: Icon }) => (
+            <NavLink
+              key={to}
+              to={to}
+              className={({ isActive }) =>
+                cn(
+                  'flex items-center gap-3 px-3 py-2 rounded-btn text-sm transition-colors duration-150 ease-smooth',
+                  isActive
+                    ? 'bg-elevated text-foreground font-medium'
+                    : 'text-foreground/80 hover:bg-elevated hover:text-foreground',
+                )
+              }
+            >
+              {({ isActive }) => (
+                <>
+                  <Icon className="h-4 w-4 shrink-0" />
+                  <span className="flex-1">{label}</span>
+                  {/* 个股分析 Beta 标识 */}
+                  {to === '/stock-analysis' && (
+                    <span className="inline-flex items-center rounded-full border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-400 shrink-0">
+                      Beta
+                    </span>
+                  )}
+                  {/* 数据同步状态: 同步中转圈, 刚完成显示绿色对勾闪烁 3 秒 */}
+                  {to === '/data' && isDataSyncing && (
+                    <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
+                  )}
+                  {to === '/data' && !isDataSyncing && dataSyncJustDone && (
+                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-bull animate-pulse" />
+                  )}
+                  {/* 监控中心徽标: 仅非监控页且有未读时显示 */}
+                  {to === '/monitor' && <MonitorBadge active={isActive} />}
+                </>
+              )}
+            </NavLink>
+          ))}
+        </nav>
 
               {/* 展开模式: 底部控件 */}
               <div className="border-t border-border px-3 py-2.5 space-y-2 shrink-0">
@@ -658,19 +667,21 @@ export function Layout() {
           )}
         </aside>
 
-        <motion.main
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
-          className="h-full overflow-auto scrollbar-gutter-stable"
-        >
-          <Outlet />
-        </motion.main>
-        <ToastContainer />
-        <AlertToastContainer />
-        <AiAnalysisHost />
-        <AiReportBubble />
-      </div>
+      <motion.main
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
+        className="h-full overflow-auto scrollbar-gutter-stable"
+      >
+        <Outlet />
+      </motion.main>
+      <ToastContainer />
+      <AlertToastContainer />
+      <AiAnalysisHost />
+      <AiReportBubble />
+      <StockAnalysisHost />
+      <StockAnalysisBubble />
+    </div>
     </div>
   )
 }
