@@ -281,7 +281,8 @@ export function Layout() {
   const { data: settingsState } = useSettings()
   const { data: versionData } = useVersion()
   const { data: prefs } = usePreferences()
-  const { data: quoteStatus } = useQuoteStatus()
+  // poll=true: 全局唯一开启条件轮询 (非交易时段 60s 兜底, 交易时段靠 SSE)
+  const { data: quoteStatus } = useQuoteStatus({ poll: true })
   const { data: analysisMenus } = useQuery({
     queryKey: QK.analysisMenus,
     queryFn: api.analysisMenus,
@@ -548,15 +549,15 @@ export function Layout() {
                   style={{ background: `linear-gradient(90deg, ${BRAND}88, transparent 80%)` }}
                 />
 
-                <TierBadge
-                  label={caps?.label ?? ''}
-                  hasKey={settingsState?.mode !== 'none'}
-                />
-                <AIConfigBadge
-                  configured={settingsState?.has_ai_key}
-                  model={settingsState?.ai_model}
-                />
-              </div>
+          <TierBadge
+            label={caps?.label ?? ''}
+            hasKey={settingsState?.mode !== 'none'}
+          />
+          <AIConfigBadge
+            configured={settingsState?.ai_configured ?? settingsState?.has_ai_key}
+            model={settingsState?.ai_model}
+          />
+        </div>
 
         <nav className="flex-1 min-h-0 overflow-y-auto px-2 py-3 space-y-0.5">
           {visibleNavItems.map(({ to, label, icon: Icon }) => (

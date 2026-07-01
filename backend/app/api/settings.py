@@ -29,6 +29,21 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 DEFAULT_PAID_ENDPOINT = "https://api.tickflow.org"
 
 
+def _sync_financial_scheduler_caps(app_state, capset) -> None:
+    """把重新探测出的能力同步给财务调度器。
+
+    app.state.capabilities 在此已更新, 但 FinancialScheduler 在启动时捕获的是旧引用,
+    需显式刷新, 否则用户升级到 Expert 后点「全部同步」仍会因调度器读旧 capset 而被拒。
+    """
+    fs = getattr(app_state, "financial_scheduler", None)
+    if fs is None:
+        return
+    try:
+        fs.update_capabilities(capset)
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger(__name__).warning("update financial_scheduler capabilities failed: %s", e)
+
+
 class TickflowKeyIn(BaseModel):
     api_key: str
 
@@ -38,8 +53,10 @@ def get_settings() -> dict:
     """返回当前配置概况(Key 脱敏)。"""
     from app.config import settings
     from app.services import preferences
+    from app.services.ai_provider import ai_configured, current_ai_model, current_codex_command
 
     key = secrets_store.get_tickflow_key()
+    ai_provider = secrets_store.get_ai_config("ai_provider", settings.ai_provider)
     return {
         "mode": tf_client.current_mode(),
         "tickflow_api_key_masked": secrets_store.mask(key),
@@ -52,11 +69,13 @@ def get_settings() -> dict:
         # 首次使用引导
         "onboarding_completed": preferences.get_onboarding_completed(),
         # AI 配置
-        "ai_provider": secrets_store.get_ai_config("ai_provider", settings.ai_provider),
+        "ai_provider": ai_provider,
         "ai_base_url": secrets_store.get_ai_config("ai_base_url", settings.ai_base_url),
         "ai_api_key_masked": secrets_store.mask(secrets_store.get_ai_key()),
         "has_ai_key": bool(secrets_store.get_ai_key()),
-        "ai_model": secrets_store.get_ai_config("ai_model", settings.ai_model),
+        "ai_configured": ai_configured(ai_provider),
+        "ai_model": current_ai_model(),
+        "ai_codex_command": current_codex_command(),
         "ai_user_agent": secrets_store.get_ai_config("ai_user_agent", settings.ai_user_agent),
     }
 
@@ -120,6 +139,7 @@ def save_tickflow_key(req: TickflowKeyIn, request: Request) -> dict:
     # 立即重新探测(此时 client 已按档位判定,但首次探测必然走付费端点验证)
     capset = detect_capabilities(force=True)
     request.app.state.capabilities = capset
+    _sync_financial_scheduler_caps(request.app.state, capset)
 
     # ===== 2) 判定为无效 key(连单只日K都拿不到)→ 不存,清除 =====
     if is_invalid_key() or base_tier_name() == "none":
@@ -128,6 +148,7 @@ def save_tickflow_key(req: TickflowKeyIn, request: Request) -> dict:
         tf_client.reset_clients()
         capset = detect_capabilities(force=True)
         request.app.state.capabilities = capset
+        _sync_financial_scheduler_caps(request.app.state, capset)
         return {
             "ok": False,
             "reason": "invalid",
@@ -184,6 +205,7 @@ def clear_tickflow_key(request: Request) -> dict:
 
     capset = detect_capabilities(force=True)
     request.app.state.capabilities = capset
+    _sync_financial_scheduler_caps(request.app.state, capset)
 
     return {
         "ok": True,
@@ -211,6 +233,7 @@ class AiSettingsIn(BaseModel):
     base_url: str = ""
     api_key: str | None = None
     model: str = ""
+    codex_command: str = ""
     user_agent: str = ""
 
 
@@ -218,6 +241,7 @@ class AiSettingsIn(BaseModel):
 def save_ai_settings(req: AiSettingsIn) -> dict:
     """保存 AI 配置（全部持久化到 secrets.json）"""
     from app.config import settings
+    from app.services.ai_provider import ai_configured, current_ai_model, current_ai_provider, current_codex_command, normalize_codex_command
 
     updates: dict = {}
     if req.provider:
@@ -233,9 +257,19 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
         else:
             secrets_store.clear("ai_api_key")
             settings.ai_api_key = ""
-    if req.model:
+    if req.provider == "codex_cli" and not req.model:
+        secrets_store.clear("ai_model")
+        settings.ai_model = ""
+    elif req.model:
         updates["ai_model"] = req.model
         settings.ai_model = req.model
+    if req.provider == "codex_cli":
+        try:
+            codex_command = normalize_codex_command(req.codex_command)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        updates["ai_codex_command"] = codex_command
+        settings.ai_codex_command = codex_command
     # user_agent 允许清空(回到默认浏览器 UA),故无条件持久化
     updates["ai_user_agent"] = req.user_agent
     settings.ai_user_agent = req.user_agent
@@ -243,7 +277,14 @@ def save_ai_settings(req: AiSettingsIn) -> dict:
     if updates:
         secrets_store.save(updates)
 
-    return {"ok": True}
+    provider = current_ai_provider()
+    return {
+        "ok": True,
+        "ai_provider": provider,
+        "ai_model": current_ai_model(),
+        "ai_codex_command": current_codex_command(),
+        "ai_configured": ai_configured(provider),
+    }
 
 
 @router.delete("/ai")
@@ -254,12 +295,13 @@ def clear_ai_settings() -> dict:
     """
     from app.config import settings
 
-    secrets_store.clear("ai_provider", "ai_base_url", "ai_api_key", "ai_model")
+    secrets_store.clear("ai_provider", "ai_base_url", "ai_api_key", "ai_model", "ai_codex_command")
     # 同步重置运行时内存(provider 回默认值,其余置空)
     settings.ai_provider = "openai_compat"
     settings.ai_base_url = ""
     settings.ai_api_key = ""
     settings.ai_model = ""
+    settings.ai_codex_command = "codex"
 
     return {"ok": True}
 
@@ -318,6 +360,7 @@ def get_preferences() -> dict:
         "depth_polling_interval": preferences.get_depth_polling_interval(),
         "depth_finalize_time": preferences.get_depth_finalize_time(),
         "review_schedule": preferences.get_review_schedule(),
+        "review_push_channels": preferences.get_review_push_channels(),
     }
 
 
@@ -990,7 +1033,7 @@ def update_review_schedule(req: ReviewScheduleIn, request: Request) -> dict:
     - enabled=True: 注册/更新 job(工作日定时生成复盘报告)
     - enabled=False: 移除 job(停止定时复盘)
     - 校验: 开启时若 AI Key 未配置则拒绝(复盘依赖 AI), 提示用户先配置。
-    - 时间下限 15:30(盘后数据就绪), 由 preferences 层强制。
+    - 时间下限 15:00(A股收盘), 由 preferences 层强制。
     """
     from app.services import preferences
 
@@ -1020,4 +1063,21 @@ def update_review_schedule(req: ReviewScheduleIn, request: Request) -> dict:
                 pass  # job 本就不存在(从未开过), 无需处理
 
     return sched
+
+
+class ReviewPushIn(BaseModel):
+    channels: list[str]  # 多选: ['feishu'] 等; 空数组=不推送。微信等开发中
+
+
+@router.put("/preferences/review-push")
+def update_review_push(req: ReviewPushIn) -> dict:
+    """复盘推送渠道(多选) — 选定把复盘报告(手动生成 / 定时生成归档后)推送到哪些外部工具。
+
+    纯偏好, 与定时复盘 / 实时行情完全独立, 常驻可单独设置。空数组=不推送。
+    实际推送由归档端点(POST /api/market-recap/reports)与定时任务(_run_scheduled_review)
+    在归档后读取本列表逐个推送。白名单外的渠道会被过滤掉。
+    """
+    from app.services import preferences
+    saved = preferences.set_review_push_channels(req.channels)
+    return {"review_push_channels": saved}
 
