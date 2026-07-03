@@ -43,17 +43,17 @@ import {
   CheckCircle2,
   BookOpenCheck,
   ExternalLink,
-  Sun,
-  Moon,
   PanelLeftClose,
   PanelLeftOpen,
   Timer,
+  Sun,
+  Moon,
   X,
 } from 'lucide-react'
 import { Logo } from './Logo'
-import { useTheme } from '@/lib/theme'
 import { api, type IndexQuote } from '@/lib/api'
 import { cn } from '@/lib/cn'
+import { toggleTheme, useTheme } from '@/lib/theme'
 import { setCurrentTotal as setAlertTotal, useUnreadAlerts } from '@/lib/monitorBadge'
 
 // 品牌色 — 只用于 logo / brand 区域,不影响功能语义色
@@ -85,6 +85,22 @@ const nav = [
   { to: '/trading', label: '交易', icon: Cable },
   { to: '/data',       label: '数据',   icon: Database },
 ] as const
+
+/** 亮/暗主题切换 — 状态存 localStorage, 生效见 lib/theme.ts */
+function ThemeToggle() {
+  const theme = useTheme()
+  const dark = theme === 'dark'
+  return (
+    <button
+      onClick={() => toggleTheme()}
+      className="flex w-full items-center gap-3 rounded-btn px-3 py-2 text-sm text-foreground/80 transition-colors duration-150 ease-smooth hover:bg-elevated hover:text-foreground cursor-pointer"
+      title={dark ? '切换到亮色模式' : '切换到暗色模式'}
+    >
+      {dark ? <Sun className="h-4 w-4 shrink-0" /> : <Moon className="h-4 w-4 shrink-0" />}
+      <span>{dark ? '亮色模式' : '暗色模式'}</span>
+    </button>
+  )
+}
 
 function fmtIndexValue(v: number | null | undefined) {
   if (v == null || Number.isNaN(Number(v))) return '--'
@@ -263,7 +279,7 @@ function AIConfigBadge({ configured, model }: { configured?: boolean; model?: st
 }
 
 export function Layout() {
-  const { theme, toggleTheme } = useTheme()
+  const theme = useTheme()
 
   // 侧边栏折叠状态 (持久化到 localStorage)
   const [collapsed, setCollapsed] = useState(() => {
@@ -691,36 +707,8 @@ export function Layout() {
           )}
         </div>
 
-        {/* 主题切换 */}
-        <div className="border-t border-border px-3 py-2 shrink-0">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] text-secondary">
-              {theme === 'dark' ? '深色' : '浅色'}
-            </span>
-            <button
-              onClick={toggleTheme}
-              className="relative inline-flex h-5 w-9 items-center rounded-full shrink-0 transition-all duration-300 bg-elevated border border-border hover:border-accent/30"
-              title={theme === 'dark' ? '切换浅色' : '切换深色'}
-            >
-              <span
-                className={`inline-flex h-4 w-4 items-center justify-center rounded-full shadow-sm transition-all duration-300 ${
-                  theme === 'dark'
-                    ? 'translate-x-[16px] bg-accent text-white'
-                    : 'translate-x-0.5 bg-warning/80 text-white'
-                }`}
-              >
-                {theme === 'dark' ? (
-                  <Moon className="h-2.5 w-2.5" />
-                ) : (
-                  <Sun className="h-2.5 w-2.5" />
-                )}
-              </span>
-            </button>
-          </div>
-        </div>
-
-        {/* 设置 */}
-        <div className="border-t border-border px-3 py-2.5 shrink-0">
+        <div className="border-t border-border px-2 py-3 space-y-0.5 shrink-0">
+          <ThemeToggle />
           <NavLink
             to="/settings"
             className={({ isActive }) =>

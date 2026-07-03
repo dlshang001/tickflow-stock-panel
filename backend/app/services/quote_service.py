@@ -26,11 +26,79 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import date, datetime, time as dt_time
+from datetime import date, time as dt_time
 
 import polars as pl
 
+from app.market_time import cn_now, cn_today
+
 logger = logging.getLogger(__name__)
+
+
+class QuoteSubscriber:
+    """一个 SSE 连接对应一个订阅者: 独立事件 + 独立队列。
+
+    此前四个通道共用服务级 Event + pending 列表, pop 是「取走」语义:
+    多客户端 (多标签页/多设备) 时告警只会被先醒来的连接消费, 其余永远
+    收不到; 共享 Event 的 clear/wait 也存在互相吞信号的竞态。
+    改为每连接独立订阅者后, 事件对所有客户端广播。
+    """
+
+    def __init__(self, max_alerts: int = 1000, max_reviews: int = 200) -> None:
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._max_alerts = max_alerts
+        self._max_reviews = max_reviews
+        self._quote_updated = False
+        self._depth_updated = False
+        self._alerts: list[dict] = []
+        self._reviews: list[str] = []
+
+    # ── 消费侧 (SSE generator 线程) ──────────────────────
+    def wait(self, timeout: float = 5.0) -> bool:
+        """阻塞等待任一通道有新信号。"""
+        return self._event.wait(timeout=timeout)
+
+    def pop(self) -> dict:
+        """原子取走全部待推送内容并复位事件。"""
+        with self._lock:
+            out = {
+                "quote_updated": self._quote_updated,
+                "depth_updated": self._depth_updated,
+                "alerts": self._alerts,
+                "reviews": self._reviews,
+            }
+            self._quote_updated = False
+            self._depth_updated = False
+            self._alerts = []
+            self._reviews = []
+            self._event.clear()
+            return out
+
+    # ── 生产侧 (行情轮询 / depth / 复盘线程) ─────────────
+    def push_alerts(self, alerts: list[dict]) -> None:
+        with self._lock:
+            self._alerts.extend(alerts)
+            if len(self._alerts) > self._max_alerts:  # 背压: 丢弃最旧
+                self._alerts = self._alerts[-self._max_alerts:]
+            self._event.set()
+
+    def push_review(self, event_json: str) -> None:
+        with self._lock:
+            self._reviews.append(event_json)
+            if len(self._reviews) > self._max_reviews:
+                self._reviews = self._reviews[-self._max_reviews:]
+            self._event.set()
+
+    def notify_quote(self) -> None:
+        with self._lock:
+            self._quote_updated = True
+            self._event.set()
+
+    def notify_depth(self) -> None:
+        with self._lock:
+            self._depth_updated = True
+            self._event.set()
 
 
 class QuoteService:
@@ -50,20 +118,16 @@ class QuoteService:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        # 串行化行情拉取: 手动 POST /refresh 与后台轮询线程可能并发调用
+        # _fetch_quotes, 两者同时写同一批 parquet/缓存会互相覆盖
+        self._fetch_lock = threading.Lock()
         self._running = False
         self._enabled = False      # 全局开关 (持久化到 preferences)
         self._interval = self.DEFAULT_INTERVAL
         self._thread: threading.Thread | None = None
         self._repo = None          # 延迟注入, 避免循环导入
-        self._update_event = threading.Event()  # SSE 通知: 行情更新后 set
-        self._alert_event = threading.Event()   # SSE 通知: 有告警时 set
-        self._depth_update_event = threading.Event()  # SSE 通知: depth 五档修正后 set (刷新连板梯队)
-        self._pending_alerts: list[dict] = []    # 待推送的告警
-        self._max_pending_alerts: int = 1000     # 背压上限: 超出丢弃最旧
-        # 复盘进度 SSE 通道: 定时复盘流式生成时, 把 meta/delta/done 事件推给开着页面的前端
-        self._review_event = threading.Event()        # SSE 通知: 有复盘进度事件时 set
-        self._pending_review: list[str] = []          # 待推送的复盘事件(JSON 字符串)
-        self._max_pending_review: int = 200           # 背压上限: 超出丢弃最旧
+        # SSE 订阅者集合: 每个 /stream 连接一个 QuoteSubscriber, 事件广播到所有订阅者
+        self._subscribers: set[QuoteSubscriber] = set()
         self._strategy_monitor = None            # 延迟注入
         self._app_state = None                   # 延迟注入 (FastAPI app.state)
 
@@ -123,6 +187,7 @@ class QuoteService:
             self._thread = threading.Thread(target=self._poll_loop, daemon=True)
             self._thread.start()
         logger.info("行情服务已启用, 轮询间隔 %.1fs", self._interval)
+        return True
 
     def disable(self) -> None:
         """关闭自动行情。"""
@@ -165,62 +230,50 @@ class QuoteService:
         """返回当前档位允许的最小间隔。"""
         return self._tier_min_interval()
 
-    def wait_for_update(self, timeout: float = 30.0) -> bool:
-        """阻塞等待下一次行情更新 (供 SSE 线程使用)。"""
-        self._update_event.clear()
-        return self._update_event.wait(timeout=timeout)
+    # ================================================================
+    # SSE 订阅管理 — 每个 /stream 连接一个订阅者, 事件广播
+    # ================================================================
 
-    def wait_for_alert(self, timeout: float = 30.0) -> bool:
-        """阻塞等待告警 (供 SSE 线程使用)。"""
-        self._alert_event.clear()
-        return self._alert_event.wait(timeout=timeout)
+    def subscribe(self) -> QuoteSubscriber:
+        """注册一个 SSE 订阅者 (连接建立时调用)。"""
+        sub = QuoteSubscriber()
+        with self._lock:
+            self._subscribers.add(sub)
+        return sub
+
+    def unsubscribe(self, sub: QuoteSubscriber) -> None:
+        """注销订阅者 (连接断开时调用)。"""
+        with self._lock:
+            self._subscribers.discard(sub)
+
+    def _snapshot_subscribers(self) -> list[QuoteSubscriber]:
+        with self._lock:
+            return list(self._subscribers)
+
+    def _broadcast_quote_updated(self) -> None:
+        for sub in self._snapshot_subscribers():
+            sub.notify_quote()
 
     def notify_depth_updated(self) -> None:
         """五档盘口修正完成后调用: 通知 SSE 推送 depth_updated, 触发连板梯队刷新。
 
         与行情/告警通道独立 — 只刷新连板梯队, 不连带刷新 watchlist 等。
         """
-        self._depth_update_event.set()
+        for sub in self._snapshot_subscribers():
+            sub.notify_depth()
 
-    def wait_for_depth_update(self, timeout: float = 30.0) -> bool:
-        """阻塞等待 depth 修正 (供 SSE 线程使用)。"""
-        self._depth_update_event.clear()
-        return self._depth_update_event.wait(timeout=timeout)
+    def _broadcast_alerts(self, alerts: list[dict]) -> None:
+        for sub in self._snapshot_subscribers():
+            sub.push_alerts(alerts)
 
-    def pop_alerts(self) -> list[dict]:
-        """取走所有待推送的告警 (线程安全)。"""
-        with self._lock:
-            alerts = self._pending_alerts
-            self._pending_alerts = []
-            return alerts
-
-    # ================================================================
-    # 复盘进度 SSE 通道 — 定时复盘流式生成时, 把事件实时推给前端
-    # ================================================================
     def push_review_event(self, event_json: str) -> None:
-        """追加一条复盘进度事件(JSON 字符串), 并唤醒 SSE generator。
+        """广播一条复盘进度事件(JSON 字符串), 唤醒所有 SSE generator。
 
         事件格式与 recap_market_stream 的产出一致(meta/delta/error/done),
-        前端 reviewStore 直接消费。背压: 超过上限丢弃最旧(复盘流几百条 delta, 200 够用)。
+        前端 reviewStore 直接消费。背压在订阅者队列内做 (丢弃最旧)。
         """
-        with self._lock:
-            self._pending_review.append(event_json)
-            if len(self._pending_review) > self._max_pending_review:
-                overflow = len(self._pending_review) - self._max_pending_review
-                self._pending_review = self._pending_review[overflow:]
-            self._review_event.set()
-
-    def wait_for_review(self, timeout: float = 30.0) -> bool:
-        """阻塞等待复盘进度事件 (供 SSE 线程使用)。"""
-        self._review_event.clear()
-        return self._review_event.wait(timeout=timeout)
-
-    def pop_review_events(self) -> list[str]:
-        """取走所有待推送的复盘事件 (线程安全)。"""
-        with self._lock:
-            events = self._pending_review
-            self._pending_review = []
-            return events
+        for sub in self._snapshot_subscribers():
+            sub.push_review(event_json)
 
     # ================================================================
     # 档位感知间隔限制
@@ -345,11 +398,12 @@ class QuoteService:
                 waited += 0.5
 
     def _fetch_quotes(self) -> None:
-        """按当前档位拉取行情。"""
-        if self.realtime_mode() == "watchlist":
-            self._fetch_watchlist_quotes()
-            return
-        self._fetch_full_market_quotes()
+        """按当前档位拉取行情。加锁串行化 (后台轮询 vs 手动 refresh)。"""
+        with self._fetch_lock:
+            if self.realtime_mode() == "watchlist":
+                self._fetch_watchlist_quotes()
+                return
+            self._fetch_full_market_quotes()
 
     def _fetch_full_market_quotes(self) -> None:
         """拉取全市场行情 → 写 daily + 计算 enriched + 更新缓存。"""
@@ -405,7 +459,9 @@ class QuoteService:
             if change_amount is None and last_price is not None and prev_close is not None:
                 change_amount = float(last_price) - float(prev_close)
             if change_pct is None and change_amount is not None and prev_close not in (None, 0):
-                change_pct = float(change_amount) / float(prev_close) * 100
+                # 与 API ext.change_pct 同为小数制 (0.0366 = 3.66%),
+                # enriched 全项目约定小数 (见 pipeline.py), 此处不可乘 100
+                change_pct = float(change_amount) / float(prev_close)
             records.append({
                 "symbol": q.get("symbol"),
                 "name": q.get("name") or ext.get("name"),
@@ -472,7 +528,7 @@ class QuoteService:
             self._flush_live_enriched(etf_daily_df, etf_quote_extra, asset_type="etf")
 
         # ---- 通知 SSE ----
-        self._update_event.set()
+        self._broadcast_quote_updated()
 
         # ---- 策略监控 + 告警评估 ----
         self._evaluate_monitors(daily_df, quote_extra)
@@ -514,7 +570,8 @@ class QuoteService:
             if change_amount is None and last_price is not None and prev_close is not None:
                 change_amount = float(last_price) - float(prev_close)
             if change_pct is None and change_amount is not None and prev_close not in (None, 0):
-                change_pct = float(change_amount) / float(prev_close) * 100
+                # 小数制, 与 ext.change_pct / enriched 口径一致 (不乘 100)
+                change_pct = float(change_amount) / float(prev_close)
             records.append({
                 "symbol": q.get("symbol"),
                 "name": q.get("name") or ext.get("name"),
@@ -555,7 +612,7 @@ class QuoteService:
                 logger.warning("自选实时日K写盘失败: %s", e)
             self._flush_live_enriched(daily_df, quote_extra, asset_type="stock", merge=True)
 
-        self._update_event.set()
+        self._broadcast_quote_updated()
         self._evaluate_monitors(daily_df, quote_extra)
 
     # ================================================================
@@ -584,7 +641,7 @@ class QuoteService:
         if not select_exprs:
             return pl.DataFrame()
         result = df.select(select_exprs).with_columns(
-            pl.lit(date.today()).cast(pl.Date).alias("date"),
+            pl.lit(cn_today()).cast(pl.Date).alias("date"),
         )
         # 修复: API 在非交易时段可能返回 open/high/low=0 或 null,
         # 导致蜡烛从 0 开始。用 close 填充这些异常值。
@@ -643,7 +700,8 @@ class QuoteService:
 
     @staticmethod
     def _is_trading_hours() -> bool:
-        now = datetime.now()
+        # 显式北京时间: 容器/服务器本地时区可能是 UTC, 用 naive now() 会整体错开轮询窗口
+        now = cn_now()
         t = now.time()
         morning = dt_time(9, 15) <= t <= dt_time(11, 35)
         afternoon = dt_time(12, 55) <= t <= dt_time(15, 5)
@@ -721,15 +779,9 @@ class QuoteService:
             # 的 mtime 校验判过期, 反复读不到)。监控引擎本轮已算出的结果存在内存
             # (latest_strategy_results), 由 /api/screener/cached 端点直接叠加读取。
 
-            # 推入待推送队列 + 通知 SSE (含背压保护)
+            # 广播到所有 SSE 订阅者 (背压保护在订阅者队列内做)
             if all_alerts:
-                with self._lock:
-                    self._pending_alerts.extend(all_alerts)
-                    # 背压: 超出上限丢弃最旧
-                    if len(self._pending_alerts) > self._max_pending_alerts:
-                        overflow = len(self._pending_alerts) - self._max_pending_alerts
-                        self._pending_alerts = self._pending_alerts[overflow:]
-                self._alert_event.set()
+                self._broadcast_alerts(all_alerts)
                 logger.info("监控评估完成: %d 条通知", len(all_alerts))
 
                 # 系统通知 (可选通道, 由 preferences 开关控制)。
@@ -879,7 +931,7 @@ class QuoteService:
                      不写 daily, 直接传给 compute_enriched_today 避免重复计算。
         """
         try:
-            today = date.today()
+            today = cn_today()
             t0 = time.perf_counter()
 
             # ---- 尝试增量路径 ----

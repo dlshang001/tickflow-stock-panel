@@ -19,6 +19,7 @@ from typing import Any, Callable
 
 import polars as pl
 
+from app.market_time import cn_today
 from app.strategy.custom_signals import _OP_BUILDERS  # type: ignore  # 复用运算符构造器
 from app.strategy import config as _strategy_config
 
@@ -349,11 +350,16 @@ class MonitorRuleEngine:
 
     # ── 规则管理 ───────────────────────────────────────
     def set_rules(self, rules: list[dict]) -> None:
-        """批量设置规则 (覆盖)。用于启动时 reload。"""
-        self._rules = {}
+        """批量设置规则 (覆盖)。用于启动时 reload。
+
+        先构建完整 dict 再原子替换 self._rules, 避免评估线程 (行情轮询)
+        读到装载了一半的规则表。
+        """
+        new_rules: dict[str, dict] = {}
         for r in rules:
             if r.get("enabled") is not False:
-                self._rules[r["id"]] = r
+                new_rules[r["id"]] = r
+        self._rules = new_rules
         logger.info("MonitorRuleEngine: 装载 %d 条规则", len(self._rules))
 
     def add_rule(self, rule: dict) -> None:
@@ -364,8 +370,8 @@ class MonitorRuleEngine:
 
     def remove_rule(self, rule_id: str) -> None:
         self._rules.pop(rule_id, None)
-        # 清理对应的 cooldown 记录
-        self._last_fire = {k: v for k, v in self._last_fire.items() if k[0] != rule_id}
+        # 清理对应的 cooldown 记录 (list 快照: 评估线程可能并发写 _last_fire)
+        self._last_fire = {k: v for k, v in list(self._last_fire.items()) if k[0] != rule_id}
 
     def clear(self) -> None:
         self._rules.clear()
@@ -391,9 +397,10 @@ class MonitorRuleEngine:
         """是否存在指定类型的 (已启用) 规则。供 quote_service 判断是否需要注入特殊数据。"""
         if not self._rules:
             return False
+        # list() 快照: API 线程可能并发增删规则, 直接迭代 dict 会抛 RuntimeError
         return any(
             r.get("enabled", True) and r.get("type") == rtype
-            for r in self._rules.values()
+            for r in list(self._rules.values())
         )
 
     # ── 评估 ───────────────────────────────────────────
@@ -413,7 +420,9 @@ class MonitorRuleEngine:
         # 每轮重置: 只保留本次 evaluate 产出的策略结果
         self._latest_strategy_results = {}
 
-        for rule_id, rule in self._rules.items():
+        # list() 快照: 本方法跑在行情轮询线程, API 线程同时 add/remove 规则
+        # 会触发 "dictionary changed size during iteration", 整轮告警丢失
+        for rule_id, rule in list(self._rules.items()):
             try:
                 events.extend(self._evaluate_rule(df, rule, now))
             except Exception as e:
@@ -555,7 +564,7 @@ class MonitorRuleEngine:
         # 现接入 history_loader, 拼历史窗口 + 今日实时行情, 经 precomputed_history 喂给引擎。
         # loader 为 None (未装配) 时退回跳过, 保持旧行为, 不破坏无历史场景。
         run_kwargs: dict = {
-            "as_of": _dt.date.today(),
+            "as_of": cn_today(),
             "overrides": overrides,
         }
         if s.filter_history_fn:
@@ -563,7 +572,7 @@ class MonitorRuleEngine:
                 logger.debug("策略 %s 需要历史数据但未注入 history_loader, 跳过实时监控", sid)
                 return []
             try:
-                today = _dt.date.today()
+                today = cn_today()
                 lookback = max(1, getattr(s, "lookback_days", 30))
                 hist_df = self._history_loader(today, lookback)
                 if hist_df is None or hist_df.is_empty():
@@ -597,7 +606,7 @@ class MonitorRuleEngine:
             import math
             self._latest_strategy_results[sid] = {
                 "total": result.total,
-                "as_of": str(_dt.date.today()),
+                "as_of": str(cn_today()),
                 "rows": [
                     {k: (None if isinstance(v, float) and not math.isfinite(v) else v)
                      for k, v in row.items()}
