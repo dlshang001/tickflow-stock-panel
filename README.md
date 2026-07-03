@@ -96,7 +96,7 @@
 | [`uv`](https://docs.astral.sh/uv/) | latest | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | `pnpm`                             | 9      | `npm i -g pnpm`                                    |
 
-### 方式 A:Dev 模式(二次开发推荐)
+### 方式 A:Dev 模式(二次开发推荐，由于刚开源近期更新频繁，可以开发模式定时git pull)
 
 ```bash
 cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
