@@ -191,8 +191,8 @@ function StockSearchBox({
   const [activeIdx, setActiveIdx] = useState(-1)
 
   const search = useQuery({
-    queryKey: QK.instrumentSearch(query),
-    queryFn: () => api.instrumentSearch(query),
+    queryKey: QK.instrumentSearch(query, 'stock,etf'),
+    queryFn: () => api.instrumentSearch(query, 20, 'stock,etf'),
     enabled: query.trim().length > 0,
     staleTime: 30_000,
   })
@@ -273,6 +273,9 @@ function StockSearchBox({
                   >
                     <span className="font-mono shrink-0 w-[80px]">{r.symbol}</span>
                     <span className="truncate text-secondary flex-1">{r.name}</span>
+                    {r.asset_type === 'etf' && (
+                      <span className="shrink-0 px-1 py-0.5 rounded text-[10px] leading-none bg-accent/10 text-accent">ETF</span>
+                    )}
                   </button>
                   <button
                     type="button"
@@ -604,6 +607,10 @@ export function Watchlist() {
   const symbols = enriched.data?.rows?.map((r: any) => r.symbol) ?? []
   const symbolsKey = symbols.join(',')
 
+  // 实时行情状态 (提前到此处: 分时轮询判断需要 realtimeRunning)
+  const quoteStatus = useQuoteStatus()
+  const realtimeRunning = quoteStatus.data?.running ?? false
+
   // 批量日k数据 (天数由列配置决定)
   const klineBatch = useQuery({
     queryKey: QK.watchlistKlineBatch(`${symbolsKey}|${candleDays}`),
@@ -615,8 +622,8 @@ export function Watchlist() {
   const klineData = dailyKVisible ? (klineBatch.data?.data ?? {}) : {}
 
   // 批量分时数据 (Pro+ 用户, 列可见时才拉)
-  // 刷新策略: 默认关闭(不轮询); 用户在实时监控设置里开启 minute_intraday_refresh 后,
-  // 盘中按 15s 轮询刷新 (不接 SSE 高频, 避免每秒拉 TickFlow 触限流)
+  // 刷新策略: 实时行情运行中自动按 15s 轮询 (不接 SSE 高频, 避免每秒拉 TickFlow 触限流);
+  // 用户也可在实时监控设置里单独开启 minute_intraday_refresh 强制刷新 (即使未开实时行情)
   const { data: prefsData } = usePreferences()
   const intradayRefreshEnabled = prefsData?.minute_intraday_refresh ?? false
   const minuteBatch = useQuery({
@@ -624,7 +631,7 @@ export function Watchlist() {
     queryFn: () => api.klineMinuteBatch(symbols),
     enabled: intradayVisible && symbols.length > 0,
     staleTime: 10_000,
-    refetchInterval: intradayRefreshEnabled ? 15_000 : false,
+    refetchInterval: (realtimeRunning || intradayRefreshEnabled) ? 15_000 : false,
   })
   const minuteData = intradayVisible ? (minuteBatch.data?.data ?? {}) : {}
 
@@ -687,8 +694,6 @@ export function Watchlist() {
   // 实时监控圆点: 仅 Free/低档 "按自选股实时监控" 模式 (mode === 'watchlist') 下显示;
   // Starter+ 全市场模式 (mode === 'full_market') 全部标的都在监控, 标圆点无意义, 故不显示。
   // 后端 Free 档实际只监控自选页前 N 个 (N = watchlist_symbol_count), 顺序与 allSymbols 一致。
-  const quoteStatus = useQuoteStatus()
-  const realtimeRunning = quoteStatus.data?.running ?? false
   const realtimeMode = quoteStatus.data?.mode
   const watchlistMonitoredCount = quoteStatus.data?.watchlist_symbol_count ?? 0
   const showRealtimeDot = realtimeRunning && realtimeMode === 'watchlist'
