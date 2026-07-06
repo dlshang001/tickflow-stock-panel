@@ -5,8 +5,6 @@
 
 [![声明:个人开源](https://img.shields.io/badge/⚠️_声明-个人开源_非_TickFlow_官方项目-green?style=for-the-badge&labelColor=red)](https://github.com/shy3130/tickflow-stock-panel)
 
-**本项目个人开源，非 [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 官方项目。** 仅供学习研究使用，与 TickFlow 官方无任何隶属或合作关系。
-
 
 
 **自托管、零运维的 A 股「选股 + 监控 + 回测」量化工作台**
@@ -31,9 +29,14 @@
 </div>
 
 
+---
 
 
-基于 [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 数据源,并非tickflow官方项目。**明确不做**:不对标同花顺 / 通达信,不内置「AI 荐股 / 涨停预测」。
+
+**本项目个人开源，基于 [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 数据源，非 [TickFlow](https://tickflow.org/auth/register?ref=V3KDKGXPEA) 官方项目。仅供学习研究使用，与 TickFlow 官方无任何隶属或合作关系。** 
+
+
+**明确不做**:不对标同花顺 / 通达信,不内置「AI 荐股 / 涨停预测」。
 
 > ⚠️ 考虑到 tickflow 数据源没有人气/资金流向等个性化数据,我将开放自有的第三方数据以供大佬们研究使用,包括但不限于当前内置的 ths 概念/ths 行业(后续更新在这里)。
 
@@ -215,6 +218,7 @@ PORT=3018                      # 服务端口
 | [docs/deployment.md](./docs/deployment.md)                                                         | 部署方式(Dev / Docker / GH Actions)、老 CPU 兼容、更新代码、访问密码 |
 | [docs/configuration.md](./docs/configuration.md)                                                   | 所有 `.env` 配置项详解(数据源、AI、服务、密码、数据目录)             |
 | [docs/features.md](./docs/features.md)                                                             | 各功能模块详细说明(选股/指标/回测/监控/个股分析/数据扩展)            |
+| [docs/custom-data-source.md](./docs/custom-data-source.md)                                         | 自定义数据源接入、YAML 配置与 mock 联调示例                         |
 | [docs/strategy.md](./docs/strategy.md)                                                             | 策略体系(18 内置策略 + 三种扩展方式 + 文件结构)                      |
 | [backend/app/strategy/prompts/strategy-guide.md](./backend/app/strategy/prompts/strategy-guide.md) | 策略开发完整规范(AI 生成与手写)                                      |
 

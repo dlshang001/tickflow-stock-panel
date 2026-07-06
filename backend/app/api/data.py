@@ -613,6 +613,8 @@ def status(request: Request) -> dict:
         "last_instruments_run": _last_finished("instruments"),
         "last_pipeline_run":    _last_finished("pipeline"),
         "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        # 指标缓存就绪标志 (启动时 enriched 异步预热, 完成前为 false)
+        "indicators_ready": getattr(request.app.state, "indicators_ready", True),
     }
 
 
@@ -661,8 +663,7 @@ def clear_data(request: Request):
     # - 待推送的实时通知队列 (进程内存)
     qs = getattr(request.app.state, "quote_service", None)
     if qs is not None:
-        with qs._lock:
-            qs._pending_alerts.clear()
+        qs.clear_pending_alerts()
 
     # 清除 Polars 缓存
     # 先 clear_cache 无条件清空内存 (refresh_cache 在磁盘无数据时会提前 return,
