@@ -69,10 +69,18 @@ def _resolve_universe(capset: CapabilitySet) -> list[str]:
 
 
 def run_instruments_sync(repo: KlineRepository) -> dict:
-    """盘前同步个股维表。"""
+    """盘前同步个股维表。
+
+    维表含当日涨跌停价 (limit_up/down), 同步完成后刷新 enriched 内存缓存,
+    确保跨天后连板梯队/选股等读到的是基于最新维表的数据 (而非前一交易日残留)。
+    """
     rows = instrument_sync.sync_instruments(repo.store.data_dir)
     _refresh_instruments_view(repo)
     _invalidate("instruments")
+    # 维表更新后重建 enriched 缓存 (clear + refresh, 与设置页「清理并刷新」同等效果)
+    if rows > 0:
+        repo.clear_cache()
+        repo.refresh_cache()
     return {"instruments_rows": rows}
 
 
@@ -718,6 +726,17 @@ def _maybe_push_review(content: str, meta: dict) -> None:
                     url, "TickFlow · 每日复盘", subtitle, content, secret
                 )
                 logger.info("review push(feishu) %s", "sent" if ok else "failed")
+            elif ch == "wecom":
+                url = preferences.get_wecom_webhook_url()
+                if not url:
+                    logger.info("review push(wecom) skipped: webhook not configured")
+                    continue
+                # 企业微信 markdown 标题已含一级标题, subtitle 拼到正文首行
+                full_body = (f"**{subtitle}**\n\n{content}" if subtitle else content)
+                ok = webhook_adapter.send_wecom_markdown(
+                    url, "TickFlow · 每日复盘", full_body
+                )
+                logger.info("review push(wecom) %s", "sent" if ok else "failed")
             # 未来更多渠道在此追加分支
     except Exception as e:  # noqa: BLE001
         logger.warning("review push error: %s", e)
