@@ -777,6 +777,15 @@ export interface CustomSourceConfig {
   datasets: Record<string, DatasetConfig>
 }
 
+export interface WecomBotStatus {
+  enabled: boolean
+  running: boolean
+  connected: boolean
+  bot_id_configured: boolean
+  secret_configured: boolean
+  last_error: string
+}
+
 export interface Preferences {
   realtime_quotes_enabled: boolean
   indices_nav_pinned: boolean
@@ -813,6 +822,9 @@ export interface Preferences {
   feishu_webhook_url?: string
   feishu_webhook_secret?: string
   wecom_webhook_url?: string
+  wecom_bot_id?: string
+  wecom_bot_secret?: string
+  wecom_bot_enabled?: boolean
   webhook_enabled_default?: boolean
   webhook_default_channels?: string[]
   sidebar_index_symbols: string[]
@@ -957,6 +969,7 @@ export const api = {
     request<{
       enabled: boolean
       running: boolean
+      paused?: boolean
       mode?: 'none' | 'watchlist' | 'full_market'
       realtime_allowed?: boolean
       interval_s: number
@@ -1019,6 +1032,21 @@ export const api = {
     request<{ wecom_webhook_url: string }>('/api/settings/preferences/wecom-webhook', {
       method: 'PUT',
       body: JSON.stringify({ url }),
+    }),
+  updateWecomBot: (botId: string, secret: string, enabled: boolean = true) =>
+    request<{
+      wecom_bot_id: string
+      wecom_bot_secret: string
+      wecom_bot_enabled: boolean
+      wecom_bot_status: WecomBotStatus
+    }>('/api/settings/preferences/wecom-bot', {
+      method: 'PUT',
+      body: JSON.stringify({ bot_id: botId, secret, enabled }),
+    }),
+  toggleWecomBot: (enabled: boolean) =>
+    request<{ wecom_bot_enabled: boolean; wecom_bot_status: WecomBotStatus }>('/api/settings/preferences/wecom-bot-toggle', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
     }),
   updateWebhookDefault: (enabled: boolean) =>
     request<{ webhook_enabled_default: boolean }>('/api/settings/preferences/webhook-enabled-default', {
@@ -1204,6 +1232,11 @@ export const api = {
     request<{ status: string; job_id: string }>('/api/kline/extend_history', {
       method: 'POST',
       body: JSON.stringify({ value, unit }),
+    }),
+  repairDaily: (startDate: string) =>
+    request<{ status: string; job_id: string }>('/api/kline/repair_daily', {
+      method: 'POST',
+      body: JSON.stringify({ start_date: startDate }),
     }),
   extendMinuteHistory: (value: number, unit: 'day' | 'month') =>
     request<{ status: string; job_id: string }>('/api/kline/extend_minute_history', {

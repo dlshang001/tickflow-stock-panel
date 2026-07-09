@@ -399,6 +399,9 @@ def get_preferences() -> dict:
         "feishu_webhook_url": preferences.get_feishu_webhook_url(),
         "feishu_webhook_secret": preferences.get_feishu_webhook_secret(),
         "wecom_webhook_url": preferences.get_wecom_webhook_url(),
+        "wecom_bot_id": preferences.get_wecom_bot_id(),
+        "wecom_bot_secret": preferences.get_wecom_bot_secret(),
+        "wecom_bot_enabled": preferences.get_wecom_bot_enabled(),
         "webhook_enabled_default": preferences.get_webhook_enabled_default(),
         "webhook_default_channels": preferences.get_webhook_default_channels(),
         "sidebar_index_symbols": preferences.get_sidebar_index_symbols(),
@@ -662,6 +665,9 @@ def update_realtime_quotes(req: RealtimeQuotesPrefs, request: Request) -> dict:
         if qs:
             qs.disable()
         return {"realtime_quotes_enabled": False, "realtime_allowed": False}
+    if req.realtime_quotes_enabled and qs and qs.is_paused():
+        # 管道/数据修正运行期间禁止开启实时行情 — 防止写盘竞态
+        raise HTTPException(status_code=409, detail="数据同步运行中，实时行情已临时暂停，请稍后再开启")
     if req.realtime_quotes_enabled and qs and qs.realtime_mode() == "watchlist" and not preferences.get_realtime_watchlist_symbols():
         preferences.save({"realtime_quotes_enabled": False})
         return {"realtime_quotes_enabled": False, "realtime_allowed": True, "mode": "watchlist", "error": "watchlist_empty"}
@@ -829,9 +835,9 @@ class WecomWebhookPrefsIn(BaseModel):
 
 @router.put("/preferences/wecom-webhook")
 def update_wecom_webhook(req: WecomWebhookPrefsIn) -> dict:
-    """企业微信群机器人 Webhook 地址 — 与飞书并列的第二推送通道。
+    """企业微信群推送 Webhook 地址 — 与飞书并列的第二推送通道。
 
-    - url: 传入空串表示清空配置; 非空需为合法企业微信群机器人地址, 或纯 key。
+    - url: 传入空串表示清空配置; 非空需为合法企业微信群推送 Webhook 地址, 或纯 key。
     - 用户可只填 key (webhook/send?key=xxx 的 xxx 部分), 后端自动补全为完整 URL。
     """
     from app.services import preferences
@@ -841,11 +847,74 @@ def update_wecom_webhook(req: WecomWebhookPrefsIn) -> dict:
     if url and not webhook_adapter.is_valid_wecom_url(url):
         raise HTTPException(
             status_code=400,
-            detail="Webhook 地址非法, 需为企业微信群机器人地址 "
+            detail="Webhook 地址非法, 需为企业微信群推送 Webhook 地址 "
                    "(https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=... 或纯 key)",
         )
     saved_url = preferences.set_wecom_webhook_url(url)
     return {"wecom_webhook_url": saved_url}
+
+
+class WecomBotPrefsIn(BaseModel):
+    bot_id: str
+    secret: str
+    enabled: bool = True
+
+
+@router.put("/preferences/wecom-bot")
+def update_wecom_bot(req: WecomBotPrefsIn, request: Request) -> dict:
+    """企业微信智能机器人(BotID + Secret)配置 — 长连接通道。
+
+    保存凭证后立即重建连接(stop→start), 因每机器人仅允许 1 条长连接。
+    - bot_id/secret 均传空串表示清空配置并断开连接。
+    - enabled 控制是否启用长连接(凭证齐全时生效)。
+    """
+    from app.services import preferences
+
+    bot_id = (req.bot_id or "").strip()
+    secret = (req.secret or "").strip()
+    preferences.set_wecom_bot_id(bot_id)
+    preferences.set_wecom_bot_secret(secret)
+    # 凭证不齐时强制关闭(避免 enabled=True 但连不上)
+    enabled = req.enabled and bool(bot_id) and bool(secret)
+    preferences.set_wecom_bot_enabled(enabled)
+
+    # 立即应用: 重建连接
+    bot_svc = getattr(request.app.state, "wecom_bot_service", None)
+    status: dict = {}
+    if bot_svc:
+        bot_svc.apply_credential_change()
+        status = bot_svc.status()
+    return {
+        "wecom_bot_id": preferences.get_wecom_bot_id(),
+        "wecom_bot_secret": preferences.get_wecom_bot_secret(),
+        "wecom_bot_enabled": preferences.get_wecom_bot_enabled(),
+        "wecom_bot_status": status,
+    }
+
+
+class WecomBotToggleIn(BaseModel):
+    enabled: bool
+
+
+@router.put("/preferences/wecom-bot-toggle")
+def toggle_wecom_bot(req: WecomBotToggleIn, request: Request) -> dict:
+    """独立开关: 启用/禁用智能机器人长连接(不改动凭证)。
+
+    凭证不齐时强制返回未启用(无法连接)。
+    """
+    from app.services import preferences
+
+    bot_id = preferences.get_wecom_bot_id()
+    secret = preferences.get_wecom_bot_secret()
+    enabled = req.enabled and bool(bot_id) and bool(secret)
+    preferences.set_wecom_bot_enabled(enabled)
+
+    bot_svc = getattr(request.app.state, "wecom_bot_service", None)
+    status: dict = {}
+    if bot_svc:
+        bot_svc.apply_credential_change()
+        status = bot_svc.status()
+    return {"wecom_bot_enabled": enabled, "wecom_bot_status": status}
 
 
 class WebhookEnabledDefaultIn(BaseModel):
