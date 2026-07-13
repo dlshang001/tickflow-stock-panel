@@ -62,8 +62,8 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
   const isTrading = quoteStatus?.is_trading_hours ?? false
   // 管道/数据修正运行期间实时行情被临时暂停 — 此时禁止开启
   const isPaused = quoteStatus?.paused ?? false
-  const interval = intervalData?.interval ?? 10
-  const minInterval = intervalData?.min_interval ?? 5
+  const interval = intervalData?.interval ?? 6
+  const minInterval = intervalData?.min_interval ?? 6
   const maxInterval = intervalData?.max_interval ?? 60
   const [intervalDraft, setIntervalDraft] = useState(interval)
   const feishuWebhookUrl = prefs?.feishu_webhook_url ?? ''
@@ -284,7 +284,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
   }
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-[1fr_1fr] gap-6 max-w-5xl">
+    <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-6 max-w-5xl">
       {/* ========== 左列 ========== */}
       <div className="space-y-6">
         {/* 行情状态 — 开关 + 间隔 */}
@@ -390,8 +390,8 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
         {/* 自选列表分时图实时刷新 (默认关闭, 开启后盘中 15s 轮询刷新分时数据) */}
         <Card icon={Activity} title="分时图刷新">
           <ToggleRow
-            label="自选分时图实时刷新"
-            desc="开启后自选列表的分时图盘中每 15 秒自动刷新（需 Pro+ 权限）。关闭时仅打开页面时拉取一次。"
+            label="自选/策略分时图实时刷新"
+            desc="开启后自选与策略列表的分时图盘中每 15 秒自动刷新（需 Pro+ 权限 + 实时行情运行）。关闭时仅打开页面时拉取一次, 可点表头刷新按钮手动更新。"
             checked={prefs?.minute_intraday_refresh ?? false}
             onChange={(v) => save({ minute_intraday_refresh: v })}
           />
@@ -475,7 +475,7 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
         </div>
 
         {/* 推送通知 — 监控告警的外部推送渠道 (全局配置)。
-            飞书 / 企业微信已实现; QMT/ptrade 待定。
+            飞书 / 企业微信。
             每个渠道合并成一行: 勾选=新建规则默认推送, 点行展开地址配置。 */}
         <Card icon={Webhook} title="推送通知">
           <p className="text-xs text-secondary mb-3">
@@ -739,21 +739,6 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
               )}
             </div>
 
-            {/* 占位渠道 — 不可点 */}
-            {[
-              { name: 'QMT', hint: '量化交易终端', status: '待定' },
-              { name: 'ptrade', hint: '量化交易终端', status: '待定' },
-            ].map(ch => (
-              <div
-                key={ch.name}
-                className="flex items-center gap-2 rounded-btn border border-border/40 bg-base/20 px-2.5 py-2 opacity-60"
-              >
-                <input type="checkbox" disabled className="h-3 w-3 accent-accent" />
-                <span className="text-[11px] text-secondary">{ch.name}</span>
-                <span className="text-[9px] text-muted">{ch.hint}</span>
-                <span className="ml-auto rounded bg-muted/10 px-1 py-px text-[9px] text-muted">{ch.status}</span>
-              </div>
-            ))}
           </div>
         </Card>
       </div>
