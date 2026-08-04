@@ -5,6 +5,7 @@ import { Activity, Check, Plus, RadioTower, Save, Search, TrendingUp, Waypoints,
 import { api, genRuleId, type MonitorRule, type MonitorCondition, type StrategyNotifyEvent } from '@/lib/api'
 import { DEFAULT_STRATEGY_NOTIFY_EVENTS, LEGACY_STRATEGY_NOTIFY_EVENTS, STRATEGY_NOTIFY_EVENT_OPTIONS } from '@/lib/strategyMonitorEvents'
 import { QK } from '@/lib/queryKeys'
+import { boardTag } from '@/components/stock-table/primitives'
 import { SignalPicker } from '@/components/screener/SignalPicker'
 import { MONITOR_INTRADAY_SIGNAL_OPTIONS, SIGNAL_OPTIONS, cnSignal } from '@/lib/signals'
 import { usePreferences } from '@/lib/useSharedQueries'
@@ -21,7 +22,7 @@ interface Props {
 }
 
 const TYPE_DEFAULT_NAME: Record<string, string> = {
-  signal: '个股信号监控', price: '价格监控', market: '市场异动监控', strategy: '策略监控',
+  signal: '信号监控', price: '价格监控', market: '市场异动监控', strategy: '策略监控',
 }
 
 const TYPE_ICONS = {
@@ -35,6 +36,7 @@ const STRATEGY_SOURCE_META = {
   builtin: { label: '内置', className: 'border-accent/25 bg-accent/10 text-accent' },
   custom: { label: '自定义', className: 'border-emerald-400/25 bg-emerald-400/10 text-emerald-400' },
   ai: { label: 'AI', className: 'border-amber-400/25 bg-amber-400/10 text-amber-400' },
+  composite: { label: '叠加', className: 'border-teal-500/25 bg-teal-500/10 text-teal-400' },
 } as const
 
 const emptyRule = (preset?: Partial<MonitorRule>): MonitorRule => ({
@@ -93,9 +95,9 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
   const [error, setError] = useState('')
   const [symbolQuery, setSymbolQuery] = useState('')
   const [strategyQuery, setStrategyQuery] = useState('')
-  const [strategyCategory, setStrategyCategory] = useState<'all' | 'builtin' | 'custom' | 'ai'>('all')
-  // ETF 规则时标的搜索一并搜出 ETF。
-  const symbolAssetTypes = assetType === 'etf' ? 'stock,etf' : 'stock'
+  const [strategyCategory, setStrategyCategory] = useState<'all' | 'builtin' | 'custom' | 'ai' | 'composite'>('all')
+  // 标的搜索资产类型: ETF 一并搜股票; 指数只搜指数; 否则只搜股票。
+  const symbolAssetTypes = assetType === 'etf' ? 'stock,etf' : assetType === 'index' ? 'index' : 'stock'
   const symbolSearch = useQuery({
     queryKey: QK.instrumentSearch(symbolQuery, symbolAssetTypes),
     queryFn: () => api.instrumentSearch(symbolQuery, 20, symbolAssetTypes),
@@ -124,7 +126,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
           if (c.op !== 'truth' && (c.value === null || c.value === undefined)) throw new Error('阈值条件需要数值')
         }
       }
-      if (d.scope === 'symbols' && d.symbols.length === 0) throw new Error('请选择至少一只股票')
+      if (d.scope === 'symbols' && d.symbols.length === 0) throw new Error('请选择至少一只标的')
       return api.monitorRuleSave(d)
     },
     onSuccess: () => {
@@ -183,6 +185,20 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
     ...SIGNAL_OPTIONS.map(key => ({ key, label: cnSignal(key) })),
     ...(options.data?.builtin_signals ?? []).filter(option => MONITOR_INTRADAY_SIGNAL_OPTIONS.includes(option.key)),
   ]
+  // 指数: 隐藏涨跌停/连板类 (指数无这些列) 与分时信号 (无本地分钟K, 会静默不触发)
+  const INDEX_HIDDEN_SIGNALS = (key: string) =>
+    key.includes('limit') || MONITOR_INTRADAY_SIGNAL_OPTIONS.includes(key)
+  const pickerSignals = assetType === 'index'
+    ? monitorBuiltinSignals.filter(o => !INDEX_HIDDEN_SIGNALS(o.key))
+    : monitorBuiltinSignals
+  // 指数: 监控类型仅 signal/price (无涨跌停/策略/封单语义)
+  const visibleTypes = (options.data?.types ?? []).filter(
+    t => assetType !== 'index' || t.key === 'signal' || t.key === 'price',
+  )
+  // 指数: 作用范围仅 symbols (无全市场/板块语义)
+  const visibleScopes = (options.data?.scopes ?? []).filter(
+    s => assetType !== 'index' || s.key === 'symbols',
+  )
   const thresholdConds = draft.conditions.filter(c => c.op !== 'truth')
   const strategyPresets = strategies.data?.presets ?? []
   const normalizedStrategyQuery = strategyQuery.trim().toLowerCase()
@@ -197,6 +213,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
     { key: 'builtin' as const, label: '内置', count: strategyPresets.filter(strategy => strategy.source === 'builtin').length },
     { key: 'custom' as const, label: '自定义', count: strategyPresets.filter(strategy => strategy.source === 'custom').length },
     { key: 'ai' as const, label: 'AI', count: strategyPresets.filter(strategy => strategy.source === 'ai').length },
+    { key: 'composite' as const, label: '叠加', count: strategyPresets.filter(strategy => strategy.source === 'composite').length },
   ]
 
   const onSignalPickerChange = (next: string[]) => {
@@ -236,7 +253,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
             signals={selectedSignals}
             onChange={onSignalPickerChange}
             kind="entry"
-            builtinSignals={monitorBuiltinSignals}
+            builtinSignals={pickerSignals}
             disabledSignals={intradaySupport?.available === false ? MONITOR_INTRADAY_SIGNAL_OPTIONS : []}
             disabledSignalHint={intradaySupport?.reason}
           />
@@ -311,26 +328,33 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
         </button>
       </div>
 
-      {/* 资产类型: 股票 / ETF (个股极简模式不显示) */}
+      {/* 资产类型: 股票 / ETF / 指数 (个股极简模式不显示) */}
       {!simple && (
         <div className="space-y-1.5">
           <span className="text-[11px] text-muted">资产类型</span>
           <div className="inline-flex h-9 rounded-btn border border-border overflow-hidden">
-            {(['stock', 'etf'] as const).map(t => (
+            {(['stock', 'etf', 'index'] as const).map(t => (
               <button
                 key={t}
                 type="button"
                 aria-pressed={assetType === t}
                 onClick={() => {
                   if (assetType === t) return
-                  setDraft(d => ({ ...d, asset_type: t, strategy_id: null, symbols: [] }))
+                  setDraft(d => ({
+                    ...d,
+                    asset_type: t,
+                    strategy_id: null,
+                    symbols: [],
+                    type: t === 'index' && d.type !== 'signal' && d.type !== 'price' ? 'signal' : d.type,
+                    scope: t === 'index' ? 'symbols' : d.scope,
+                  }))
                   setStrategyQuery('')
                   setStrategyCategory('all')
                 }}
                 className={`h-full px-4 text-xs font-medium transition-colors cursor-pointer
                   ${assetType === t ? 'bg-accent/10 text-accent' : 'text-muted hover:text-foreground'}`}
               >
-                {t === 'stock' ? '股票' : 'ETF'}
+                {t === 'stock' ? '股票' : t === 'etf' ? 'ETF' : '指数'}
               </button>
             ))}
           </div>
@@ -341,7 +365,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
       <div className="space-y-1.5">
         <span className="text-[11px] text-muted">监控类型</span>
         <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
-          {(options.data?.types ?? []).map(t => {
+          {visibleTypes.map(t => {
             const Icon = TYPE_ICONS[t.key as keyof typeof TYPE_ICONS] ?? Activity
             const active = draft.type === t.key
             return (
@@ -384,7 +408,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
         <span className="text-[11px] text-muted">作用范围</span>
         <div className="flex items-center gap-2">
           <select value={draft.scope} onChange={e => setDraft(d => ({ ...d, scope: e.target.value as MonitorRule['scope'] }))} className="h-9 w-32 rounded-btn border border-border bg-base px-3 text-xs text-foreground">
-            {(options.data?.scopes ?? []).map(s => <option key={s.key} value={s.key} disabled={hasIntradaySignal && s.key !== 'symbols'}>{s.label}</option>)}
+            {visibleScopes.map(s => <option key={s.key} value={s.key} disabled={hasIntradaySignal && s.key !== 'symbols'}>{s.label}</option>)}
           </select>
           {draft.scope === 'symbols' && (
             <div className="flex-1 flex flex-wrap items-center gap-1.5">
@@ -400,7 +424,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                 <input
                   value={symbolQuery}
                   onChange={e => setSymbolQuery(e.target.value)}
-                  placeholder="搜索股票..."
+                  placeholder="搜索代码或名称..."
                   className="h-7 w-32 rounded border border-border bg-base pl-6 pr-2 text-[11px] text-foreground focus:outline-none focus:border-accent/50"
                 />
                 <Search className="absolute left-1.5 top-1.5 h-3.5 w-3.5 text-muted" />
@@ -409,6 +433,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                     {symbolSearch.data.results.map(r => (
                       <button key={r.symbol} onClick={() => addSymbol(r.symbol)} className="block w-full px-2 py-1 text-left text-[11px] hover:bg-elevated cursor-pointer">
                         <span className="font-mono text-foreground/80">{r.symbol}</span>
+                        {(() => { const b = boardTag(r.symbol); return b && <span className={`ml-1 inline-flex items-center justify-center rounded px-0.5 text-[9px] font-bold leading-tight border ${b.color}`}>{b.label}</span> })()}
                         <span className="ml-1 text-muted">{r.name}</span>
                       </button>
                     ))}
@@ -417,7 +442,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
               </div>
             </div>
           )}
-          {draft.scope === 'all' && <span className="text-[11px] text-muted">对全市场所有股票生效</span>}
+          {draft.scope === 'all' && <span className="text-[11px] text-muted">对全市场所有标的生效</span>}
           {draft.scope === 'sector' && <span className="text-[11px] text-muted/60">板块精确过滤(开发中,当前等同全市场)</span>}
         </div>
       </div>
@@ -447,7 +472,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                 signals={selectedSignals}
                 onChange={onSignalPickerChange}
                 kind="entry"
-                builtinSignals={monitorBuiltinSignals}
+                builtinSignals={pickerSignals}
                 disabledSignals={intradaySupport?.available === false ? MONITOR_INTRADAY_SIGNAL_OPTIONS : []}
                 disabledSignalHint={intradaySupport?.reason}
               />
@@ -455,7 +480,7 @@ export function RuleEditor({ rule, preset, simple, onClose, onSaved }: Props) {
                 <div className={`mt-2 text-[10px] ${intradaySupport?.available === false ? 'text-danger' : 'text-muted'}`}>
                   {intradaySupport?.available === false
                     ? intradaySupport.reason
-                    : `分时穿越按已完成的一分钟判断,仅支持指定股票,当前最多监听 ${intradaySupport?.max_symbols ?? 0} 只。`}
+                    : `分时穿越按已完成的一分钟判断,仅支持指定标的,当前最多监听 ${intradaySupport?.max_symbols ?? 0} 只。`}
                 </div>
               )}
             </div>

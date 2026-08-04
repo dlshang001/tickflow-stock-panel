@@ -8,6 +8,7 @@ import { Skeleton } from '@/components/data/Skeleton'
 import { api, type MonitorRule, type AlertEvent, type MonitorCondition, type MonitorExtFieldItem } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { fmtPrice, fmtPct } from '@/lib/format'
+import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 import { cn } from '@/lib/cn'
 import { cnSignal } from '@/lib/signals'
 import { LEGACY_STRATEGY_NOTIFY_EVENTS, STRATEGY_NOTIFY_EVENT_OPTIONS, strategyEventMeta, strategyName } from '@/lib/strategyMonitorEvents'
@@ -19,7 +20,7 @@ import { DimensionMembersDialog, type DimensionKind, type DimensionMembersTarget
 import { usePreferences } from '@/lib/useSharedQueries'
 
 const TYPE_LABEL: Record<string, string> = {
-  signal: '个股信号', price: '价格/涨跌', market: '市场异动', strategy: '策略监控',
+  signal: '信号', price: '价格/涨跌', market: '市场异动', strategy: '策略监控',
 }
 
 /** 严重级别 → 左侧色条 + 图标 */
@@ -337,7 +338,7 @@ function AlertsList({ alertsQuery, confirmClear, setConfirmClear, total, enterTs
         <EmptyState
           icon={Bell}
           title="暂无触发记录"
-          hint="监控规则命中后,触发记录会出现在这里。可在右侧配置规则,或在个股详情页加入监控。"
+          hint="监控规则命中后,触发记录会出现在这里。可在右侧配置规则,或在标的详情页加入监控。"
         />
       ) : (
         <div className="space-y-2">
@@ -643,11 +644,11 @@ function RulesList({ rulesQuery, onEdit }: {
         <EmptyState
           icon={RadioTower}
           title="暂无监控规则"
-          hint="点击标题栏「+」新建规则,或在个股详情页点「加监控」快速添加。"
+          hint="点击标题栏「+」新建规则,或在标的详情页点「加监控」快速添加。"
         />
       ) : (
         rules.map(r => {
-          // 名称截取: "策略监控 · MACD金叉" → "MACD金叉", "个股信号监控 · 300750.SZ" → "个股信号监控"
+          // 名称截取: "策略监控 · MACD金叉" → "MACD金叉", "信号监控 · 300750.SZ" → "信号监控"
           const dotIdx = r.name.indexOf(' · ')
           const displayName = dotIdx >= 0 ? r.name.slice(dotIdx + 3) : r.name
           return (
@@ -672,6 +673,9 @@ function RulesList({ rulesQuery, onEdit }: {
                   <span className={cn('shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold', SOURCE_BADGE_STYLE[r.type] ?? 'bg-elevated text-muted')}>
                     {TYPE_LABEL[r.type]}
                   </span>
+                  {r.asset_type === 'index' && (
+                    <span className="shrink-0 rounded px-1.5 py-0.5 text-[9px] font-semibold bg-sky-500/10 text-sky-400">指数</span>
+                  )}
                   {/* 个股类型: 直接显示可点击的代码+名称; 其他类型显示规则名 */}
                   {r.scope === 'symbols' && r.symbols.length > 0 ? (
                     <button
@@ -779,6 +783,7 @@ function RulesList({ rulesQuery, onEdit }: {
 
 // ── 规则编辑对话框 ────────────────────────────────────
 function RuleEditorDialog({ open, rule, onClose }: { open: boolean; rule: MonitorRule | null; onClose: () => void }) {
+  const backdrop = useDialogBackdrop(onClose)
   return (
     <AnimatePresence>
       {open && (
@@ -787,7 +792,7 @@ function RuleEditorDialog({ open, rule, onClose }: { open: boolean; rule: Monito
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           className="fixed inset-0 z-50 flex items-start justify-center overflow-auto bg-black/40 backdrop-blur-sm p-4"
-          onClick={onClose}
+          {...backdrop}
         >
           <motion.div
             initial={{ opacity: 0, scale: 0.96, y: 8 }}
