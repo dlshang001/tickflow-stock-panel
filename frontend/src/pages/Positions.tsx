@@ -184,6 +184,7 @@ export function Positions() {
 
   // ===== AI 持仓复盘 =====
   const [aiOpen, setAiOpen] = useState(false)
+  const [aiStarted, setAiStarted] = useState(false) // 是否已发起过本轮复盘(区分"刚打开"与"分析中")
   const [aiLoading, setAiLoading] = useState(false)
   const [aiContent, setAiContent] = useState('')
   const [aiError, setAiError] = useState('')
@@ -254,6 +255,7 @@ export function Positions() {
     setAiContent('')
     setAiError('')
     setAiMeta(null)
+    setAiStarted(true)
     aiAbortRef.current = false
     loadHistory()
     try {
@@ -289,6 +291,18 @@ export function Positions() {
   const closeAi = () => {
     aiAbortRef.current = true
     setAiOpen(false)
+  }
+
+  // 仅打开弹窗(不自动复盘):让用户能先看历史,或手动点"开始复盘"
+  const openAi = () => {
+    setAiOpen(true)
+    setViewing(null)
+    setAiStarted(false)
+    setAiLoading(false)
+    setAiError('')
+    setAiContent('')
+    setAiMeta(null)
+    loadHistory()
   }
 
   // 主区域显示内容:查看历史优先于流式内容(不覆盖后台生成)
@@ -431,7 +445,7 @@ export function Positions() {
         right={
           <div className="flex items-center gap-2">
             <button
-              onClick={() => runAiReview('')}
+              onClick={openAi}
               disabled={rows.length === 0}
               className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white text-xs font-medium hover:opacity-90 disabled:opacity-40 transition-opacity"
               title="AI 复盘当前全部持仓"
@@ -732,7 +746,28 @@ export function Positions() {
                         </span>
                       </div>
                       <div className="text-sm text-foreground">AI 正在复盘持仓…</div>
-                      <div className="text-xs text-secondary">分析盈亏结构 · 行业集中度 · 技术状态 · 风险点</div>
+                      <div className="text-xs text-secondary">分析盈亏结构 · 行业集中度 · 板块强弱 · 风险点</div>
+                    </div>
+                  ) : !aiStarted && !aiContent ? (
+                    <div className="flex flex-col items-center justify-center gap-4 py-16 text-center">
+                      <div className="relative">
+                        <span className="grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-violet-500/20 to-fuchsia-500/15 border border-violet-500/30">
+                          <Sparkles className="h-6 w-6 text-violet-400" />
+                        </span>
+                      </div>
+                      <div>
+                        <div className="text-sm font-medium text-foreground">AI 持仓复盘</div>
+                        <p className="mx-auto mt-1.5 max-w-xs text-xs leading-relaxed text-secondary">
+                          综合持仓盈亏、行业/概念集中度、当日板块强弱与大盘环境,生成客观组合复盘。
+                        </p>
+                      </div>
+                      <button
+                        className="inline-flex items-center gap-1.5 h-9 px-4 rounded-lg bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white text-xs font-medium hover:opacity-90 transition-opacity"
+                        onClick={() => runAiReview(aiFocus)}
+                      >
+                        <Sparkles className="h-3.5 w-3.5" /> 开始复盘
+                      </button>
+                      <p className="text-[11px] text-muted">也可直接在右侧查看历史复盘报告</p>
                     </div>
                   ) : (
                     <>
