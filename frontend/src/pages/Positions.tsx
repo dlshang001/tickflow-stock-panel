@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Trash2, Pencil, Check, Crosshair, Settings2, Sparkles, X, Copy, RefreshCw, History } from 'lucide-react'
+import { Plus, Trash2, Pencil, Check, Crosshair, Settings2, Sparkles, X, Copy, RefreshCw, History, CalendarClock } from 'lucide-react'
 import { useLocation } from 'react-router-dom'
 import { api, type PositionEntry, type KlineRow, type MinuteKlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
@@ -10,15 +10,17 @@ import { getSignals, signalCls } from '@/lib/stock-table'
 import { MiniCandlestick } from '@/components/stock-table/MiniCandlestick'
 import { MiniIntraday } from '@/components/stock-table/MiniIntraday'
 import { resolveCandleConfig, resolveIntradayConfig } from '@/lib/list-columns'
-import { useCapabilities } from '@/lib/useSharedQueries'
+import { useCapabilities, usePreferences } from '@/lib/useSharedQueries'
 import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
+import { toast } from '@/components/Toast'
+import { cn } from '@/lib/cn'
 import { startAnalysis as startStockAnalysis } from '@/lib/stockAnalysisStore'
 import { ListColumnCustomizer } from '@/components/ListColumnCustomizer'
 import { StockSearchSelect } from '@/components/StockSearchSelect'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
-import { COLUMN_GROUPS, loadColumnConfig, saveColumnConfig, type ColumnConfig } from '@/lib/positions-columns'
+import { COLUMN_GROUPS, BUILTIN_COLUMNS, loadColumnConfig, saveColumnConfig, type ColumnConfig } from '@/lib/positions-columns'
 
 const inputCls = 'h-9 px-3 rounded-lg border border-border bg-elevated text-sm text-foreground outline-none focus:border-accent transition-colors'
 const btnPrimary = 'inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accent/90 disabled:opacity-40 transition-colors'
@@ -30,7 +32,13 @@ export function Positions() {
   const qc = useQueryClient()
   const location = useLocation() as { state?: { symbol?: string; anchor_price?: number | null } }
 
-  const [columns, setColumns] = useState<ColumnConfig[]>(() => loadColumnConfig())
+  const [columns, setColumns] = useState<ColumnConfig[]>(() => [...BUILTIN_COLUMNS])
+  const columnsLoaded = useRef(false)
+  useEffect(() => {
+    if (columnsLoaded.current) return
+    columnsLoaded.current = true
+    loadColumnConfig().then(setColumns)
+  }, [])
   const [customizerOpen, setCustomizerOpen] = useState(false)
   const [editing, setEditing] = useState<PositionEntry | null>(null)
 
@@ -183,9 +191,9 @@ export function Positions() {
   const [aiFocus, setAiFocus] = useState('')
   const aiAbortRef = useRef<boolean>(false)
   // 历史报告
-  const [historyOpen, setHistoryOpen] = useState(false)
   const [historyReports, setHistoryReports] = useState<any[]>([])
   const [historyLoading, setHistoryLoading] = useState(false)
+  const [viewing, setViewing] = useState<any | null>(null)
 
   const loadHistory = async () => {
     setHistoryLoading(true)
@@ -199,34 +207,55 @@ export function Positions() {
     }
   }
 
-  const openHistory = () => {
-    setHistoryOpen(true)
-    loadHistory()
-  }
-
+  // 查看历史报告:不覆盖后台流式内容,用 viewing 单独承载;点"返回当前"清空。
   const openHistoryReport = (report: any) => {
-    setAiContent(report.content ?? '')
-    setAiMeta(report.summary ?? null)
-    setAiFocus(report.focus ?? '')
-    setAiError('')
-    setAiLoading(false)
-    setHistoryOpen(false)
+    setViewing(report)
   }
+  const backToCurrent = () => setViewing(null)
 
   const deleteHistoryReport = async (id: string) => {
     setHistoryReports(prev => prev.filter(r => r.id !== id))
+    if (viewing?.id === id) setViewing(null)
     try { await api.positionReportDelete(id) } catch { /* 静默 */ }
+  }
+
+  // ===== 定时复盘设置 =====
+  const prefs = usePreferences()
+  const posSched = prefs.data?.position_review_schedule ?? { enabled: false, hour: 15, minute: 15 }
+  const posPushChannels = prefs.data?.position_review_push_channels ?? []
+  const feishuConfigured = !!(prefs.data?.feishu_webhook_url)
+  const wecomConfigured = !!(prefs.data?.wecom_webhook_url)
+  const [scheduleOpen, setScheduleOpen] = useState(false)
+  const [schedDraft, setSchedDraft] = useState<{ enabled: boolean; hour: number; minute: number }>(posSched)
+  const openSchedule = () => { setSchedDraft(posSched); setScheduleOpen(true) }
+  const schedMut = useMutation({
+    mutationFn: (v: { enabled: boolean; hour: number; minute: number }) =>
+      api.updatePositionReviewSchedule(v.enabled, v.hour, v.minute),
+    onSuccess: (_d, v) => {
+      qc.invalidateQueries({ queryKey: QK.preferences })
+      setScheduleOpen(false)
+      toast(v.enabled ? '已开启每日持仓复盘' : '已关闭每日持仓复盘', 'success')
+    },
+  })
+  const pushMut = useMutation({
+    mutationFn: (channels: string[]) => api.updatePositionReviewPush(channels),
+    onSuccess: () => qc.invalidateQueries({ queryKey: QK.preferences }),
+  })
+  const togglePush = (ch: string) => {
+    const next = posPushChannels.includes(ch) ? posPushChannels.filter((c: string) => c !== ch) : [...posPushChannels, ch]
+    pushMut.mutate(next)
   }
 
   const runAiReview = async (focus = '') => {
     if (rows.length === 0) return
     setAiOpen(true)
-    setHistoryOpen(false)
+    setViewing(null)
     setAiLoading(true)
     setAiContent('')
     setAiError('')
     setAiMeta(null)
     aiAbortRef.current = false
+    loadHistory()
     try {
       let first = true
       for await (const chunk of api.positionAnalyzeStream(focus)) {
@@ -249,6 +278,8 @@ export function Positions() {
         }
       }
       if (first && !aiAbortRef.current) { setAiLoading(false); setAiError('未返回内容,请重试') }
+      // 流结束后后端已自动归档,刷新历史列表
+      loadHistory()
     } catch (e: any) {
       setAiLoading(false)
       setAiError(String(e?.message ?? '复盘失败'))
@@ -259,6 +290,9 @@ export function Positions() {
     aiAbortRef.current = true
     setAiOpen(false)
   }
+
+  // 主区域显示内容:查看历史优先于流式内容(不覆盖后台生成)
+  const displayContent = viewing?.content ?? aiContent
 
   const analyzeOne = (r: any) => {
     const price = priceOf(r)
@@ -404,6 +438,19 @@ export function Positions() {
             >
               <Sparkles className="h-3.5 w-3.5" /> AI 复盘
             </button>
+            <button
+              onClick={openSchedule}
+              className={cn(
+                "inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border text-xs transition-colors",
+                posSched.enabled
+                  ? "border-violet-400/50 text-violet-300 bg-violet-500/10"
+                  : "border-border text-secondary hover:text-foreground",
+              )}
+              title="每日收盘自动持仓复盘与推送设置"
+            >
+              <CalendarClock className="h-3.5 w-3.5" />
+              {posSched.enabled ? `定时 ${String(posSched.hour).padStart(2, '0')}:${String(posSched.minute).padStart(2, '0')}` : '定时复盘'}
+            </button>
             <button onClick={() => setCustomizerOpen(true)} className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border border-border text-xs text-secondary hover:text-foreground transition-colors">
               <Settings2 className="h-3.5 w-3.5" /> 列
             </button>
@@ -504,6 +551,89 @@ export function Positions() {
         showExtColumns={false}
       />
 
+      {scheduleOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => !schedMut.isPending && setScheduleOpen(false)} />
+          <div className="relative w-full max-w-md rounded-card border border-border bg-base shadow-2xl">
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-border">
+              <div className="flex items-center gap-2">
+                <CalendarClock className="h-4 w-4 text-violet-400" />
+                <span className="text-sm font-medium text-foreground">每日持仓复盘</span>
+              </div>
+              <button className="p-1 text-muted hover:text-foreground" onClick={() => setScheduleOpen(false)}><X className="h-4 w-4" /></button>
+            </div>
+            <div className="px-5 py-4 space-y-4">
+              <label className="flex items-center justify-between cursor-pointer">
+                <div>
+                  <div className="text-sm text-foreground">启用每日自动复盘</div>
+                  <div className="text-[11px] text-muted mt-0.5">交易日收盘后自动生成持仓复盘并归档</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSchedDraft(d => ({ ...d, enabled: !d.enabled }))}
+                  className={cn("relative h-5 w-9 rounded-full transition-colors", schedDraft.enabled ? "bg-violet-500" : "bg-border")}
+                >
+                  <span className={cn("absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform", schedDraft.enabled ? "translate-x-4" : "translate-x-0.5")} />
+                </button>
+              </label>
+
+              {schedDraft.enabled && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-secondary">触发时间</span>
+                  <select
+                    value={schedDraft.hour}
+                    onChange={e => setSchedDraft(d => ({ ...d, hour: Number(e.target.value) }))}
+                    className="h-8 rounded-md border border-border bg-elevated px-2 text-xs text-foreground"
+                  >
+                    {Array.from({ length: 9 }, (_, i) => i + 15).map(h => <option key={h} value={h}>{String(h).padStart(2, '0')}</option>)}
+                  </select>
+                  <span className="text-xs text-muted">:</span>
+                  <select
+                    value={schedDraft.minute}
+                    onChange={e => setSchedDraft(d => ({ ...d, minute: Number(e.target.value) }))}
+                    className="h-8 rounded-md border border-border bg-elevated px-2 text-xs text-foreground"
+                  >
+                    {[0, 5, 10, 15, 20, 30, 45].map(m => <option key={m} value={m}>{String(m).padStart(2, '0')}</option>)}
+                  </select>
+                  <span className="text-[11px] text-muted">收盘后(≥15:00)</span>
+                </div>
+              )}
+
+              <div className="border-t border-border pt-3">
+                <div className="text-xs text-secondary mb-2">复盘后推送到</div>
+                <div className="space-y-2">
+                  {[
+                    { id: 'feishu', label: '飞书', configured: feishuConfigured },
+                    { id: 'wecom', label: '企业微信', configured: wecomConfigured },
+                  ].map(ch => {
+                    const on = posPushChannels.includes(ch.id)
+                    return (
+                      <label key={ch.id} className="flex items-center gap-2 cursor-pointer" onClick={() => togglePush(ch.id)}>
+                        <span className={cn("flex h-4 w-4 items-center justify-center rounded border", on ? "border-violet-500 bg-violet-500 text-white" : "border-border")}>
+                          {on && <Check className="h-3 w-3" />}
+                        </span>
+                        <span className="text-xs text-foreground">{ch.label}</span>
+                        {!ch.configured && <span className="text-[10px] text-muted">(未配置 webhook)</span>}
+                      </label>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 px-5 py-3 border-t border-border">
+              <button className="h-8 px-3 rounded-lg border border-border text-xs text-secondary hover:text-foreground" onClick={() => setScheduleOpen(false)}>取消</button>
+              <button
+                className="h-8 px-4 rounded-lg bg-violet-500 text-white text-xs font-medium hover:bg-violet-500/90 disabled:opacity-50"
+                disabled={schedMut.isPending}
+                onClick={() => schedMut.mutate({ enabled: schedDraft.enabled, hour: schedDraft.hour, minute: schedDraft.minute })}
+              >
+                {schedMut.isPending ? '保存中…' : '保存'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <StockPreviewDialog
         symbol={previewSymbol}
         name={previewName}
@@ -513,31 +643,31 @@ export function Positions() {
       {aiOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={closeAi} />
-          <div className="relative w-full max-w-2xl max-h-[85vh] flex flex-col rounded-card border border-border bg-base shadow-2xl">
-            <div className="flex items-center justify-between px-5 py-3.5 border-b border-border">
-              <div className="flex items-center gap-2">
-                <span className="inline-flex items-center justify-center h-7 w-7 rounded-lg bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white">
+          <div className="relative w-full max-w-5xl max-h-[92vh] flex flex-col rounded-card border border-border bg-base shadow-2xl">
+            {/* 头部 */}
+            <div className="flex items-center justify-between px-5 py-3 border-b border-border shrink-0">
+              <div className="flex items-center gap-2.5">
+                <span className="inline-flex items-center justify-center h-8 w-8 rounded-lg bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white">
                   <Sparkles className="h-4 w-4" />
                 </span>
                 <div>
-                  <div className="text-sm font-medium text-foreground">AI 持仓复盘</div>
-                  {aiMeta && (
-                    <div className="text-[11px] text-muted">
-                      {aiMeta.count} 只持仓 · 总市值 {fmtBigNum(aiMeta.total_market_value)} · 浮盈亏 {aiMeta.total_pnl_pct != null ? (aiMeta.total_pnl_pct > 0 ? '+' : '') + aiMeta.total_pnl_pct + '%' : '—'}
-                    </div>
-                  )}
+                  <div className="text-sm font-semibold text-foreground">AI 持仓复盘</div>
+                  <div className="text-[11px] text-muted">
+                    {viewing
+                      ? `查看历史 · ${viewing.as_of || ''}`
+                      : aiMeta
+                        ? `${aiMeta.count ?? 0} 只持仓 · 总市值 ${fmtBigNum(aiMeta.total_market_value ?? 0)} · 浮盈亏 ${aiMeta.total_pnl_pct != null ? (aiMeta.total_pnl_pct > 0 ? '+' : '') + aiMeta.total_pnl_pct + '%' : '—'}`
+                        : '客观复盘持仓结构、集中度与风险'}
+                  </div>
                 </div>
               </div>
               <div className="flex items-center gap-1">
-                <button className="p-1.5 rounded-md text-muted hover:text-foreground hover:bg-elevated" title="历史报告" onClick={openHistory}>
-                  <History className="h-4 w-4" />
-                </button>
-                {!aiLoading && aiContent && (
+                {!aiLoading && displayContent && (
                   <>
                     <button className="p-1.5 rounded-md text-muted hover:text-foreground hover:bg-elevated" title="重新生成" onClick={() => runAiReview(aiFocus)}>
                       <RefreshCw className="h-4 w-4" />
                     </button>
-                    <button className="p-1.5 rounded-md text-muted hover:text-foreground hover:bg-elevated" title="复制" onClick={() => navigator.clipboard?.writeText(aiContent)}>
+                    <button className="p-1.5 rounded-md text-muted hover:text-foreground hover:bg-elevated" title="复制" onClick={() => navigator.clipboard?.writeText(displayContent)}>
                       <Copy className="h-4 w-4" />
                     </button>
                   </>
@@ -548,50 +678,44 @@ export function Positions() {
               </div>
             </div>
 
-            <div className="relative flex-1 overflow-hidden">
-              {historyOpen ? (
-                <div className="absolute inset-0 overflow-y-auto px-5 py-4">
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="text-sm font-medium text-foreground">历史复盘报告</div>
-                    <button className="text-xs text-muted hover:text-foreground" onClick={() => setHistoryOpen(false)}>返回当前</button>
+            {/* 关注点输入 */}
+            <form
+              className="flex items-center gap-2 px-5 py-3 border-b border-border shrink-0"
+              onSubmit={(e) => { e.preventDefault(); if (!viewing) runAiReview(aiFocus) }}
+            >
+              <Sparkles className="h-3.5 w-3.5 shrink-0 text-violet-400" />
+              <input
+                className="flex-1 h-9 px-3 rounded-lg border border-border bg-elevated text-sm text-foreground outline-none focus:border-violet-400/50 transition-colors"
+                placeholder="想重点看什么？如：医药仓位、风险点（可选，回车重新复盘）"
+                value={aiFocus}
+                onChange={e => setAiFocus(e.target.value)}
+              />
+              <button type="submit" className={btnPrimary} disabled={aiLoading}>
+                {aiLoading ? '分析中…' : (viewing ? '返回并重新复盘' : '重新复盘')}
+              </button>
+            </form>
+
+            {/* 双栏:报告 + 历史 */}
+            <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[1fr_18rem] gap-3 p-3 overflow-hidden">
+              {/* 左:报告主体 */}
+              <div className="overflow-hidden rounded-lg border border-border bg-surface/80 flex flex-col min-h-0">
+                <div className="flex items-center justify-between border-b border-border px-4 py-2 shrink-0">
+                  <div className="flex items-center gap-1.5">
+                    {aiLoading && !viewing
+                      ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-violet-400" />
+                      : <Sparkles className="h-3.5 w-3.5 text-violet-400" />}
+                    <span className="text-xs font-medium text-foreground">
+                      {viewing ? '历史复盘报告' : aiLoading ? 'AI 正在复盘…' : '复盘报告'}
+                    </span>
                   </div>
-                  {historyLoading ? (
-                    <div className="py-10 text-center text-xs text-muted">加载中…</div>
-                  ) : historyReports.length === 0 ? (
-                    <div className="py-10 text-center text-xs text-muted">还没有历史报告，复盘完成后会自动归档。</div>
-                  ) : (
-                    <div className="space-y-2">
-                      {historyReports.map((r: any) => {
-                        const s = r.summary || {}
-                        const pnlPct = s.total_pnl_pct
-                        return (
-                          <div key={r.id} className="group flex items-center gap-3 p-3 rounded-lg border border-border hover:bg-elevated/50 transition-colors cursor-pointer" onClick={() => openHistoryReport(r)}>
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center gap-2 text-xs">
-                                <span className="text-foreground font-medium">{r.as_of || (r.created_at || '').slice(0, 10)}</span>
-                                <span className="text-muted">{r.count ?? s.count ?? 0} 只</span>
-                                {r.focus && <span className="text-accent truncate">· {r.focus}</span>}
-                              </div>
-                              <div className="mt-1 text-[11px] text-muted truncate">
-                                总市值 {fmtBigNum(s.total_market_value ?? 0)} · 浮盈亏 {pnlPct != null ? (pnlPct > 0 ? '+' : '') + pnlPct + '%' : '—'} · {new Date(r.created_at).toLocaleString()}
-                              </div>
-                            </div>
-                            <button
-                              className="opacity-0 group-hover:opacity-100 p-1 text-muted hover:text-danger transition-opacity"
-                              title="删除"
-                              onClick={(e) => { e.stopPropagation(); deleteHistoryReport(r.id) }}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                        )
-                      })}
-                    </div>
+                  {viewing && (
+                    <button className="text-[11px] text-violet-400 hover:text-violet-300" onClick={backToCurrent}>← 返回当前</button>
                   )}
                 </div>
-              ) : (
-                <div className="h-full overflow-y-auto px-5 py-4 text-sm text-secondary leading-relaxed">
-                  {aiError ? (
+                <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden px-5 py-4 thin-scrollbar ai-review-body text-sm text-secondary leading-relaxed">
+                  {viewing ? (
+                    <MarkdownRenderer content={viewing.content ?? ''} />
+                  ) : aiError ? (
                     <div className="flex flex-col items-center gap-3 py-10 text-center">
                       <div className="text-sm text-danger">{aiError}</div>
                       {aiError.includes('未配置') || aiError.includes('API Key') || aiError.includes('AI') ? (
@@ -601,11 +725,14 @@ export function Positions() {
                       )}
                     </div>
                   ) : aiLoading && !aiContent ? (
-                    <div className="flex items-center gap-2 text-muted py-10">
-                      <span className="h-2 w-2 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: '0ms' }} />
-                      <span className="h-2 w-2 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: '150ms' }} />
-                      <span className="h-2 w-2 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: '300ms' }} />
-                      <span className="ml-2">正在分析持仓与大盘环境…</span>
+                    <div className="flex flex-col items-center justify-center gap-3 py-16">
+                      <div className="relative">
+                        <span className="grid h-11 w-11 place-items-center rounded-full bg-violet-500/15 border border-violet-500/30">
+                          <Sparkles className="h-5 w-5 animate-pulse text-violet-400" />
+                        </span>
+                      </div>
+                      <div className="text-sm text-foreground">AI 正在复盘持仓…</div>
+                      <div className="text-xs text-secondary">分析盈亏结构 · 行业集中度 · 技术状态 · 风险点</div>
                     </div>
                   ) : (
                     <>
@@ -614,23 +741,82 @@ export function Positions() {
                     </>
                   )}
                 </div>
-              )}
-            </div>
+              </div>
 
-            <form
-              className="flex items-center gap-2 px-5 py-3 border-t border-border"
-              onSubmit={(e) => { e.preventDefault(); runAiReview(aiFocus) }}
-            >
-              <input
-                className="flex-1 h-9 px-3 rounded-lg border border-border bg-elevated text-sm text-foreground outline-none focus:border-accent transition-colors"
-                placeholder="想重点看什么？如：医药仓位、风险点（可选）"
-                value={aiFocus}
-                onChange={e => setAiFocus(e.target.value)}
-              />
-              <button type="submit" className={btnPrimary} disabled={aiLoading}>
-                {aiLoading ? '分析中…' : '重新复盘'}
-              </button>
-            </form>
+              {/* 右:历史(常驻) */}
+              <div className="hidden lg:flex overflow-hidden rounded-lg border border-border bg-surface/80 flex-col min-h-0">
+                <div className="flex items-center gap-1.5 border-b border-border px-3 py-2 shrink-0">
+                  <History className="h-3.5 w-3.5 text-violet-400" />
+                  <span className="text-xs font-medium text-foreground">历史复盘</span>
+                  <span className="font-mono text-[10px] text-muted">({historyReports.length})</span>
+                  <button className="ml-auto p-1 text-muted hover:text-foreground" title="刷新" onClick={loadHistory}>
+                    <RefreshCw className={cn("h-3 w-3", historyLoading && "animate-spin")} />
+                  </button>
+                </div>
+                <div className="flex-1 min-h-0 overflow-y-auto p-2 thin-scrollbar">
+                  {historyLoading && historyReports.length === 0 ? (
+                    <div className="grid h-20 place-items-center"><RefreshCw className="h-4 w-4 animate-spin text-muted" /></div>
+                  ) : historyReports.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center gap-2 px-3 py-10 text-center">
+                      <History className="h-7 w-7 text-muted/40" strokeWidth={1.5} />
+                      <div className="text-[11px] text-muted">暂无历史复盘</div>
+                      <div className="text-[10px] text-muted/60">复盘完成后自动归档</div>
+                    </div>
+                  ) : (
+                    <div className="space-y-1">
+                      {aiLoading && !viewing && (
+                        <div className="flex items-center gap-2 rounded px-2 py-2 bg-violet-500/10 ring-1 ring-violet-500/20">
+                          <div className="grid h-8 w-8 shrink-0 place-items-center rounded bg-violet-500/15">
+                            <RefreshCw className="h-3.5 w-3.5 animate-spin text-violet-400" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="text-[11px] font-medium text-violet-300">生成中…</div>
+                            <div className="mt-0.5 text-[10px] text-secondary">AI 正在复盘当前持仓</div>
+                          </div>
+                        </div>
+                      )}
+                      {historyReports.map((r: any) => {
+                        const s = r.summary || {}
+                        const pnl = s.total_pnl_pct
+                        const active = viewing?.id === r.id
+                        return (
+                          <div
+                            key={r.id}
+                            className={cn(
+                              "group flex items-center gap-2 rounded px-2 py-2 cursor-pointer transition-colors",
+                              active ? "bg-violet-500/10 ring-1 ring-violet-500/20" : "hover:bg-elevated/60",
+                            )}
+                            onClick={() => openHistoryReport(r)}
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-[11px] font-medium text-foreground">{r.as_of || (r.created_at || '').slice(0, 10)}</span>
+                                <span className="text-[10px] text-muted">{r.count ?? s.count ?? 0} 只</span>
+                                {pnl != null && (
+                                  <span className={cn("font-mono text-[10px] font-medium tabular-nums", pnl > 0 ? "text-up" : pnl < 0 ? "text-down" : "text-secondary")}>
+                                    {pnl > 0 ? '+' : ''}{pnl}%
+                                  </span>
+                                )}
+                              </div>
+                              <div className="mt-0.5 truncate text-[10px] text-secondary">
+                                市值 {fmtBigNum(s.total_market_value ?? 0)} · {new Date(r.created_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                              </div>
+                            </div>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); deleteHistoryReport(r.id) }}
+                              className="shrink-0 p-1 text-muted opacity-0 group-hover:opacity-100 hover:text-danger transition-all"
+                              title="删除"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       )}

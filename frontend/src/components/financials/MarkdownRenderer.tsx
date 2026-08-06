@@ -129,17 +129,9 @@ export function MarkdownRenderer({ content }: { content: string }) {
       const table = parseTable(lines, i)
       if (table) {
         const [header, ...body] = table.rows
-        const ncol = header.length
         blocks.push(
-          <div key={key++} className="my-5 overflow-hidden rounded-btn border border-border/30">
-            <table className="w-full text-xs border-collapse table-fixed">
-              <colgroup>
-                {/* 首列(维度)较窄;末列(判断/说明)最宽并允许折行 */}
-                <col className="w-auto" />
-                {Array.from({ length: ncol - 1 }).map((_, ci) => (
-                  <col key={ci} className={ci === ncol - 2 ? 'w-1/2' : 'w-auto'} />
-                ))}
-              </colgroup>
+          <div key={key++} className="my-5 overflow-x-auto rounded-btn border border-border/30">
+            <table className="w-full text-xs border-collapse table-auto">
               <thead>
                 <tr className="bg-elevated/50">
                   {header.map((cell, ci) => (
@@ -153,7 +145,7 @@ export function MarkdownRenderer({ content }: { content: string }) {
                 {body.map((row, ri) => (
                   <tr key={ri} className="border-b border-border/20 last:border-0 hover:bg-elevated/20">
                     {row.map((cell, ci) => (
-                      <td key={ci} className="px-2.5 py-1.5 text-foreground align-top break-words">
+                      <td key={ci} className="px-2.5 py-1.5 text-foreground align-top whitespace-normal">
                         {renderInline(cell, `td-${key}-${ri}-${ci}`)}
                       </td>
                     ))}

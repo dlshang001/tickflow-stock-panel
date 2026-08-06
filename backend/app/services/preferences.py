@@ -434,6 +434,49 @@ def set_review_push_channels(channels: list[str]) -> list[str]:
     return cleaned
 
 
+def get_position_review_schedule() -> dict:
+    """定时持仓复盘调度 {"enabled": False, "hour": 15, "minute": 15}。默认关闭。
+
+    紧随大盘复盘(默认 15:10)之后,默认 15:15;强制下限 15:00。
+    """
+    d = load().get("position_review_schedule", {"enabled": False, "hour": 15, "minute": 15})
+    return {
+        "enabled": bool(d.get("enabled", False)),
+        "hour": d.get("hour", 15),
+        "minute": d.get("minute", 15),
+    }
+
+
+def set_position_review_schedule(enabled: bool, hour: int, minute: int) -> dict:
+    """保存定时持仓复盘调度。强制时间下限 15:00。"""
+    h = max(0, min(23, hour))
+    m = max(0, min(59, minute))
+    if h * 60 + m < 15 * 60:
+        h, m = 15, 0
+    save({"position_review_schedule": {"enabled": bool(enabled), "hour": h, "minute": m}})
+    return {"enabled": bool(enabled), "hour": h, "minute": m}
+
+
+def get_position_review_push_channels() -> list[str]:
+    """定时持仓复盘推送渠道。结构与大盘复盘一致,独立配置。空列表 = 不推送。"""
+    raw = load().get("position_review_push_channels")
+    if isinstance(raw, list):
+        return [c for c in raw if c in REVIEW_PUSH_CHANNELS]
+    return []
+
+
+def set_position_review_push_channels(channels: list[str]) -> list[str]:
+    """保存定时持仓复盘推送渠道。过滤白名单外的值、去重、保序。"""
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for c in channels or []:
+        if c in REVIEW_PUSH_CHANNELS and c not in seen:
+            seen.add(c)
+            cleaned.append(c)
+    save({"position_review_push_channels": cleaned})
+    return cleaned
+
+
 
 # ===== 实时监控 =====
 
@@ -761,6 +804,28 @@ def get_screener_result_columns() -> list[dict] | None:
 def set_screener_result_columns(columns: list[dict]) -> list[dict]:
     """保存策略结果列表列配置。"""
     save({"screener_result_columns": columns})
+    return columns
+
+
+def get_damiao_columns() -> list[dict] | None:
+    """返回大喵票池列表列配置。"""
+    return load().get("damiao_columns")
+
+
+def set_damiao_columns(columns: list[dict]) -> list[dict]:
+    """保存大喵票池列表列配置。"""
+    save({"damiao_columns": columns})
+    return columns
+
+
+def get_positions_columns() -> list[dict] | None:
+    """返回持仓列表列配置。"""
+    return load().get("positions_columns")
+
+
+def set_positions_columns(columns: list[dict]) -> list[dict]:
+    """保存持仓列表列配置。"""
+    save({"positions_columns": columns})
     return columns
 
 

@@ -930,6 +930,8 @@ export interface Preferences {
   depth_finalize_time: { hour: number; minute: number }
   review_schedule: { enabled: boolean; hour: number; minute: number }
   review_push_channels: string[]
+  position_review_schedule: { enabled: boolean; hour: number; minute: number }
+  position_review_push_channels: string[]
   sse_refresh_pages: Record<string, boolean>
   strategy_monitor_enabled: boolean
   strategy_monitor_ids: string[]
@@ -1215,6 +1217,16 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ channels }),
     }),
+  updatePositionReviewSchedule: (enabled: boolean, hour: number, minute: number) =>
+    request<{ enabled: boolean; hour: number; minute: number }>('/api/settings/preferences/position-review-schedule', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled, hour, minute }),
+    }),
+  updatePositionReviewPush: (channels: string[]) =>
+    request<{ position_review_push_channels: string[] }>('/api/settings/preferences/position-review-push', {
+      method: 'PUT',
+      body: JSON.stringify({ channels }),
+    }),
   updateDepthPollingInterval: (interval: number) =>
     request<{ depth_polling_interval: number }>('/api/settings/preferences/depth-polling-interval', {
       method: 'PUT',
@@ -1274,6 +1286,24 @@ export const api = {
     request<{ columns: any[] | null }>('/api/settings/preferences/screener-result-columns'),
   updateScreenerResultColumns: (columns: any[]) =>
     request<{ columns: any[] }>('/api/settings/preferences/screener-result-columns', {
+      method: 'PUT',
+      body: JSON.stringify({ columns }),
+    }),
+
+  // 大喵票池列表列配置
+  damiaoColumns: () =>
+    request<{ columns: any[] | null }>('/api/settings/preferences/damiao-columns'),
+  updateDamiaoColumns: (columns: any[]) =>
+    request<{ columns: any[] }>('/api/settings/preferences/damiao-columns', {
+      method: 'PUT',
+      body: JSON.stringify({ columns }),
+    }),
+
+  // 持仓列表列配置
+  positionsColumns: () =>
+    request<{ columns: any[] | null }>('/api/settings/preferences/positions-columns'),
+  updatePositionsColumns: (columns: any[]) =>
+    request<{ columns: any[] }>('/api/settings/preferences/positions-columns', {
       method: 'PUT',
       body: JSON.stringify({ columns }),
     }),
@@ -1442,6 +1472,16 @@ export const api = {
 
   // ===== 大喵观察票池 =====
   damiaoPoolList: () => request<{ rows: DamiaoPoolEntry[] }>('/api/damiao-pool'),
+  damiaoPoolBatchParse: (text: string) =>
+    request<{ items: any[]; count: number; error?: string }>('/api/damiao-pool/batch-parse', {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    }),
+  damiaoPoolBatchAdd: (items: { symbol: string; category: string; note: string }[], sourceDate: string) =>
+    request<{ rows: DamiaoPoolEntry[]; added: any[]; count: number }>('/api/damiao-pool/batch-add', {
+      method: 'POST',
+      body: JSON.stringify({ items, source_date: sourceDate }),
+    }),
   damiaoPoolAdd: (body: {
     symbol: string; source_date?: string; category?: string; strategy?: string; note?: string; anchor_price?: number | null
   }) =>

@@ -4,8 +4,10 @@
  * 盈亏/市值/仓位占比为前端 computed 列,由 Positions 页面渲染。
  */
 import { storage } from '@/lib/storage'
+import { api } from '@/lib/api'
 import {
   mergeColumns as mergeColumnsBase,
+  serializeColumns as serializeColumnsBase,
   type ColumnConfig,
   type ColumnGroup,
 } from '@/lib/list-columns'
@@ -89,14 +91,35 @@ export const BUILTIN_COLUMNS: ColumnConfig[] = [
 
 export const ACTION_COLUMN_ID = 'pos:action'
 
-export function loadColumnConfig(): ColumnConfig[] {
+/** 加载列配置:后端优先 → localStorage → 默认值。 */
+export async function loadColumnConfig(): Promise<ColumnConfig[]> {
+  // 1. 后端
+  try {
+    const res = await api.positionsColumns()
+    if (res.columns && res.columns.length > 0) {
+      const merged = mergeColumnsBase(res.columns, BUILTIN_COLUMNS, { actionColumnId: ACTION_COLUMN_ID })
+      storage.positionsColumns.set(serializeColumnsBase(merged, ACTION_COLUMN_ID))
+      return merged
+    }
+  } catch {
+    // 后端不可用继续
+  }
+  // 2. localStorage
   const saved = storage.positionsColumns.get([]) as ColumnConfig[]
   if (saved.length > 0) {
     return mergeColumnsBase(saved, BUILTIN_COLUMNS, { actionColumnId: ACTION_COLUMN_ID })
   }
+  // 3. 默认
   return [...BUILTIN_COLUMNS]
 }
 
-export function saveColumnConfig(columns: ColumnConfig[]): void {
-  storage.positionsColumns.set(columns.filter(c => c.id !== ACTION_COLUMN_ID))
+/** 保存列配置:同时写 localStorage(即时)与后端(跨设备)。 */
+export async function saveColumnConfig(columns: ColumnConfig[]): Promise<void> {
+  const saveable = serializeColumnsBase(columns, ACTION_COLUMN_ID)
+  storage.positionsColumns.set(saveable)
+  try {
+    await api.updatePositionsColumns(saveable)
+  } catch {
+    // 后端不可用时 localStorage 仍有效
+  }
 }

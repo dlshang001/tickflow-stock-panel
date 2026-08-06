@@ -630,6 +630,7 @@ def _run_tracked(fn, job_label: str) -> None:
 # ================================================================
 
 REVIEW_JOB_ID = "scheduled_review"
+POSITION_REVIEW_JOB_ID = "scheduled_position_review"
 
 
 async def _run_scheduled_review(repo) -> None:
@@ -805,6 +806,107 @@ def _maybe_push_review(content: str, meta: dict) -> None:
         logger.warning("review push error: %s", e)
 
 
+# ================================================================
+# 定时持仓复盘 (AI 持仓复盘报告)
+# ================================================================
+
+async def _run_scheduled_position_review(repo) -> None:
+    """定时持仓复盘:非流式生成 → 归档 → 推送。
+
+    与大盘复盘解耦,有持仓才生成;无持仓或 AI Key 未配置时跳过。
+    任何异常吞掉只记日志,不影响调度器。
+    """
+    try:
+        from app.services import positions, position_reports
+        from app.services.position_analyzer import analyze_positions_once
+        from app import secrets_store as ss
+
+        if not ss.get_ai_key():
+            logger.info("scheduled position review skipped: AI key not configured")
+            return
+
+        pos_rows = positions.list_rows()
+        if not pos_rows:
+            logger.info("scheduled position review skipped: no positions")
+            return
+
+        app_state = _get_app_state()
+        quote_service = getattr(app_state, "quote_service", None) if app_state else None
+
+        content, meta = await analyze_positions_once(repo, quote_service, pos_rows)
+        if not content:
+            logger.warning("scheduled position review produced no content")
+            return
+
+        summary = meta.get("summary") or {}
+        position_reports.save_report({
+            "as_of": meta.get("as_of") or "",
+            "focus": "",
+            "content": content,
+            "summary": summary,
+            "count": meta.get("count") or summary.get("count") or len(pos_rows),
+        })
+        logger.info("scheduled position review saved: as_of=%s", meta.get("as_of"))
+
+        _maybe_push_position_review(content, meta)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("scheduled position review failed: %s", e)
+
+
+def _maybe_push_position_review(content: str, meta: dict) -> None:
+    """持仓复盘归档后,按 position_review_push_channels 推送。失败静默降级。"""
+    try:
+        from app.services import preferences, webhook_adapter
+
+        channels = preferences.get_position_review_push_channels()
+        if not channels:
+            return
+
+        summary = meta.get("summary") or {}
+        as_of = meta.get("as_of") or ""
+        parts = []
+        if as_of:
+            parts.append(as_of)
+        if summary.get("count"):
+            parts.append(f"{summary['count']} 只持仓")
+        pnl = summary.get("total_pnl_pct")
+        if pnl is not None:
+            parts.append(f"浮盈亏 {pnl:+.2f}%" if isinstance(pnl, (int, float)) else f"浮盈亏 {pnl}")
+        subtitle = " · ".join(parts)
+
+        for ch in channels:
+            if ch == "feishu":
+                url = preferences.get_feishu_webhook_url()
+                if not url:
+                    continue
+                secret = preferences.get_feishu_webhook_secret()
+                ok = webhook_adapter.send_feishu_card(url, "持仓复盘", subtitle, content, secret)
+                logger.info("position review push(feishu) %s", "sent" if ok else "failed")
+            elif ch == "wecom":
+                url = preferences.get_wecom_webhook_url()
+                if not url:
+                    continue
+                full_body = (f"**{subtitle}**\n\n{content}" if subtitle else content)
+                ok = webhook_adapter.send_wecom_markdown(url, "持仓复盘", full_body)
+                logger.info("position review push(wecom) %s", "sent" if ok else "failed")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("position review push error: %s", e)
+
+
+def _register_position_review_job(scheduler, repo, hour: int, minute: int) -> None:
+    """注册/更新定时持仓复盘 job(工作日 mon-fri, Asia/Shanghai)。"""
+    scheduler.add_job(
+        _run_scheduled_position_review,
+        args=[repo],
+        trigger=CronTrigger(day_of_week="mon-fri",
+                            hour=hour, minute=minute,
+                            timezone="Asia/Shanghai"),
+        id=POSITION_REVIEW_JOB_ID,
+        misfire_grace_time=7200,
+        replace_existing=True,
+    )
+
+
 def _register_review_job(scheduler, repo, hour: int, minute: int) -> None:
     """注册/更新定时复盘 job(工作日 mon-fri, Asia/Shanghai)。
 
@@ -948,6 +1050,13 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
         _register_review_job(scheduler, repo, review_sched["hour"], review_sched["minute"])
         logger.info("scheduled_review enabled @%02d:%02d mon-fri",
                     review_sched["hour"], review_sched["minute"])
+
+    # 定时持仓复盘:默认关闭,用户在设置中开启。
+    pos_review_sched = preferences.get_position_review_schedule()
+    if pos_review_sched["enabled"]:
+        _register_position_review_job(scheduler, repo, pos_review_sched["hour"], pos_review_sched["minute"])
+        logger.info("scheduled_position_review enabled @%02d:%02d mon-fri",
+                    pos_review_sched["hour"], pos_review_sched["minute"])
 
     scheduler.start()
     logger.info("scheduler started; instruments@%02d:%02d, pipeline@%02d:%02d, depth@%02d:%02d mon-fri",

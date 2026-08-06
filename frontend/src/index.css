@@ -65,6 +65,31 @@ html.dark {
 .tabular { font-variant-numeric: tabular-nums; }
 .num { font-family: theme('fontFamily.mono'); font-variant-numeric: tabular-nums; }
 
+/* AI 持仓复盘正文:表格自适应列宽、不挤字 */
+.ai-review-body table {
+  width: 100%;
+  table-layout: auto;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  margin: 12px 0;
+  display: table;
+}
+.ai-review-body th,
+.ai-review-body td {
+  padding: 6px 10px;
+  border: 1px solid hsl(var(--border));
+  white-space: normal;
+  word-break: break-word;
+  vertical-align: top;
+}
+.ai-review-body th {
+  background: hsl(var(--elevated) / 0.6);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.ai-review-body h2,
+.ai-review-body h3 { margin-top: 1.1em; }
+
 /* 默认 1px 细分隔线(暗色用边框区分层次,不用 shadow) */
 * { border-color: hsl(var(--border)); }
 

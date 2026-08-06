@@ -671,6 +671,36 @@ def update_screener_result_columns(req: dict) -> dict:
     return {"columns": saved}
 
 
+@router.get("/preferences/damiao-columns")
+def get_damiao_columns() -> dict:
+    """返回大喵票池列表列配置。"""
+    from app.services import preferences
+    return {"columns": preferences.get_damiao_columns()}
+
+
+@router.put("/preferences/damiao-columns")
+def update_damiao_columns(req: dict) -> dict:
+    """保存大喵票池列表列配置。"""
+    from app.services import preferences
+    columns = req.get("columns", [])
+    return {"columns": preferences.set_damiao_columns(columns)}
+
+
+@router.get("/preferences/positions-columns")
+def get_positions_columns() -> dict:
+    """返回持仓列表列配置。"""
+    from app.services import preferences
+    return {"columns": preferences.get_positions_columns()}
+
+
+@router.put("/preferences/positions-columns")
+def update_positions_columns(req: dict) -> dict:
+    """保存持仓列表列配置。"""
+    from app.services import preferences
+    columns = req.get("columns", [])
+    return {"columns": preferences.set_positions_columns(columns)}
+
+
 @router.put("/preferences/minute-sync")
 def update_minute_sync(req: MinuteSyncPrefs) -> dict:
     """保存分钟 K 同步偏好。
@@ -1453,3 +1483,42 @@ def update_review_push(req: ReviewPushIn) -> dict:
     from app.services import preferences
     saved = preferences.set_review_push_channels(req.channels)
     return {"review_push_channels": saved}
+
+
+@router.put("/preferences/position-review-schedule")
+def update_position_review_schedule(req: ReviewScheduleIn, request: Request) -> dict:
+    """保存定时持仓复盘调度并立即更新 APScheduler job。"""
+    from app.services import preferences
+
+    if req.enabled:
+        from app import secrets_store
+        if not secrets_store.get_ai_key():
+            raise HTTPException(
+                status_code=400,
+                detail="持仓复盘依赖 AI,请先在「设置 → AI」配置 API Key 后再开启",
+            )
+
+    sched = preferences.set_position_review_schedule(req.enabled, req.hour, req.minute)
+
+    from app.jobs.daily_pipeline import _register_position_review_job, POSITION_REVIEW_JOB_ID
+    scheduler = getattr(request.app.state, "scheduler", None)
+    if scheduler:
+        if sched["enabled"]:
+            _register_position_review_job(scheduler, request.app.state.repo, sched["hour"], sched["minute"])
+            logger.info("scheduled_position_review enabled @%02d:%02d mon-fri",
+                        sched["hour"], sched["minute"])
+        else:
+            try:
+                scheduler.remove_job(POSITION_REVIEW_JOB_ID)
+            except Exception:
+                pass
+
+    return sched
+
+
+@router.put("/preferences/position-review-push")
+def update_position_review_push(req: ReviewPushIn) -> dict:
+    """定时持仓复盘推送渠道(多选)。空数组=不推送。"""
+    from app.services import preferences
+    saved = preferences.set_position_review_push_channels(req.channels)
+    return {"position_review_push_channels": saved}

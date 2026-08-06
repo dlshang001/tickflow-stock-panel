@@ -1,6 +1,6 @@
-import React, { useMemo, useState, useCallback } from 'react'
+import React, { useMemo, useState, useCallback, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Trash2, Pencil, Flag, ArrowRightLeft, X, Settings2, Check } from 'lucide-react'
+import { Plus, Trash2, Pencil, Flag, ArrowRightLeft, X, Settings2, Check, ClipboardPaste } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { api, type DamiaoCategory, type DamiaoPoolEntry, type KlineRow, type MinuteKlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
@@ -11,13 +11,15 @@ import { MiniCandlestick } from '@/components/stock-table/MiniCandlestick'
 import { MiniIntraday } from '@/components/stock-table/MiniIntraday'
 import { resolveCandleConfig, resolveIntradayConfig } from '@/lib/list-columns'
 import { useCapabilities } from '@/lib/useSharedQueries'
+import { toast } from '@/components/Toast'
+import { cn } from '@/lib/cn'
 import { ListColumnCustomizer } from '@/components/ListColumnCustomizer'
 import { StockSearchSelect } from '@/components/StockSearchSelect'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import {
-  COLUMN_GROUPS, loadColumnConfig, saveColumnConfig,
+  COLUMN_GROUPS, BUILTIN_COLUMNS, loadColumnConfig, saveColumnConfig,
   type ColumnConfig,
 } from '@/lib/damiao-columns'
 
@@ -61,8 +63,14 @@ export function DamiaoPool() {
   const qc = useQueryClient()
   const navigate = useNavigate()
 
-  const [columns, setColumns] = useState<ColumnConfig[]>(() => loadColumnConfig())
+  const [columns, setColumns] = useState<ColumnConfig[]>(() => [...BUILTIN_COLUMNS])
   const [customizerOpen, setCustomizerOpen] = useState(false)
+  const columnsLoaded = useRef(false)
+  useEffect(() => {
+    if (columnsLoaded.current) return
+    columnsLoaded.current = true
+    loadColumnConfig().then(setColumns)
+  }, [])
   const [hideExited, setHideExited] = useState(true)
   const [categoryFilter, setCategoryFilter] = useState<string>('all')
   const [activeTab, setActiveTab] = useState<string>('all') // 'all' | date | 'exited'
@@ -76,6 +84,53 @@ export function DamiaoPool() {
   // 编辑/收官弹层
   const [editing, setEditing] = useState<DamiaoPoolEntry | null>(null)
   const [exiting, setExiting] = useState<DamiaoPoolEntry | null>(null)
+
+  // 批量录入
+  const [batchOpen, setBatchOpen] = useState(false)
+  const [batchText, setBatchText] = useState('')
+  const [batchDate, setBatchDate] = useState(todayStr())
+  const [batchItems, setBatchItems] = useState<any[]>([])
+  const [batchParsing, setBatchParsing] = useState(false)
+  const [batchSelected, setBatchSelected] = useState<Set<string>>(new Set())
+  const parseBatch = useCallback(async () => {
+    if (!batchText.trim()) return
+    setBatchParsing(true)
+    try {
+      const res = await api.damiaoPoolBatchParse(batchText)
+      setBatchItems(res.items ?? [])
+      setBatchSelected(new Set((res.items ?? []).map((_: any, i: number) => String(i))))
+    } finally {
+      setBatchParsing(false)
+    }
+  }, [batchText])
+  const batchAddMut = useMutation({
+    mutationFn: () => {
+      const items = batchItems
+        .filter((_, i) => batchSelected.has(String(i)))
+        .map((it: any) => ({ symbol: it.symbol, category: it.category, note: it.note || '' }))
+      return api.damiaoPoolBatchAdd(items, batchDate)
+    },
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: QK.damiaoPool })
+      qc.invalidateQueries({ queryKey: QK.damiaoPoolEnriched() })
+      toast(`已批量加入 ${res.count} 只`, 'success')
+      setBatchOpen(false)
+      setBatchText('')
+      setBatchItems([])
+      setBatchSelected(new Set())
+    },
+  })
+  const toggleBatchItem = (i: number) => {
+    setBatchSelected(prev => {
+      const next = new Set(prev)
+      const k = String(i)
+      if (next.has(k)) next.delete(k); else next.add(k)
+      return next
+    })
+  }
+  const setBatchItemCategory = (i: number, category: string) => {
+    setBatchItems(prev => prev.map((it, idx) => idx === i ? { ...it, category } : it))
+  }
 
   // 个股预览弹窗(复用自选页 StockPreviewDialog)
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
@@ -373,9 +428,14 @@ export function DamiaoPool() {
         title="大喵观察票池"
         subtitle="追踪群主每日预案 · 按推荐事件记录 · 自动锚定入池价"
         right={
-          <button onClick={() => setCustomizerOpen(true)} className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border border-border text-xs text-secondary hover:text-foreground transition-colors">
-            <Settings2 className="h-3.5 w-3.5" /> 列
-          </button>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setBatchOpen(true)} className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border border-border text-xs text-secondary hover:text-foreground transition-colors">
+              <ClipboardPaste className="h-3.5 w-3.5" /> 批量录入
+            </button>
+            <button onClick={() => setCustomizerOpen(true)} className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border border-border text-xs text-secondary hover:text-foreground transition-colors">
+              <Settings2 className="h-3.5 w-3.5" /> 列
+            </button>
+          </div>
         }
       />
 
@@ -515,6 +575,90 @@ export function DamiaoPool() {
         name={previewName}
         onClose={closePreview}
       />
+
+      {batchOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => !batchAddMut.isPending && setBatchOpen(false)} />
+          <div className="relative w-full max-w-2xl max-h-[88vh] flex flex-col rounded-card border border-border bg-base shadow-2xl">
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-border">
+              <div className="flex items-center gap-2">
+                <ClipboardPaste className="h-4 w-4 text-accent" />
+                <span className="text-sm font-medium text-foreground">批量录入预案</span>
+              </div>
+              <button className="p-1 text-muted hover:text-foreground" onClick={() => setBatchOpen(false)}><X className="h-4 w-4" /></button>
+            </div>
+
+            <div className="px-5 py-4 space-y-3 overflow-y-auto">
+              <p className="text-[11px] text-muted leading-relaxed">
+                粘贴群主当天预案文本,每行一只票。支持<strong className="text-secondary">股票名称</strong>(如"同仁堂")和<strong className="text-secondary">六位代码</strong>(如 600085 / (SH600085));
+                含"新开仓/做T/止盈/止损/老等"等关键词会自动归类,其余描述保留为备注。解析后可逐条确认、改分类,再批量入池。
+              </p>
+              <textarea
+                autoFocus
+                value={batchText}
+                onChange={e => setBatchText(e.target.value)}
+                placeholder={'例:\n同仁堂 新观察 五日线可看\n浪潮信息 新开仓 低吸\n600519 老等继续持有\n东方财富 做T加仓'}
+                className="w-full h-36 resize-none rounded-lg border border-border bg-elevated p-3 text-sm text-foreground outline-none focus:border-accent"
+              />
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-secondary">提及日期</span>
+                <input type="date" className="h-8 rounded-md border border-border bg-elevated px-2 text-xs text-foreground" value={batchDate} onChange={e => setBatchDate(e.target.value)} />
+                <button className="ml-auto h-8 px-3 rounded-lg bg-accent text-white text-xs font-medium hover:bg-accent/90 disabled:opacity-50" disabled={batchParsing || !batchText.trim()} onClick={parseBatch}>
+                  {batchParsing ? '解析中…' : '解析预览'}
+                </button>
+              </div>
+
+              {batchItems.length > 0 && (
+                <div className="rounded-lg border border-border divide-y divide-border max-h-64 overflow-y-auto">
+                  {batchItems.map((it: any, i: number) => {
+                    const checked = batchSelected.has(String(i))
+                    return (
+                      <div key={i} className={cn("flex items-center gap-2 px-3 py-2", checked ? '' : 'opacity-50')}>
+                        <button onClick={() => toggleBatchItem(i)} className={cn("flex h-4 w-4 items-center justify-center rounded border shrink-0", checked ? "border-accent bg-accent text-white" : "border-border")}>
+                          {checked && <Check className="h-3 w-3" />}
+                        </button>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5 text-xs">
+                            <span className="text-foreground font-medium">{it.name || it.symbol}</span>
+                            <span className="text-muted">{it.symbol}</span>
+                            <span className="text-[10px] text-muted/70">{it.matched_by === 'code' ? '代码' : '名称'}</span>
+                          </div>
+                          {it.note && <div className="text-[11px] text-muted truncate">{it.note}</div>}
+                        </div>
+                        <select
+                          value={it.category}
+                          onChange={e => setBatchItemCategory(i, e.target.value)}
+                          className="h-7 rounded-md border border-border bg-elevated px-1.5 text-[11px] text-foreground shrink-0"
+                        >
+                          {WATCH_CATEGORIES.map(c => <option key={c} value={c}>{CATEGORY_LABEL[c]}</option>)}
+                          <option value="take_profit">止盈</option>
+                          <option value="stop_loss">止损</option>
+                        </select>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between gap-2 px-5 py-3 border-t border-border">
+              <span className="text-[11px] text-muted">
+                {batchItems.length > 0 ? `已选 ${batchSelected.size} / ${batchItems.length} 只` : '解析后选择要入池的票'}
+              </span>
+              <div className="flex gap-2">
+                <button className="h-8 px-3 rounded-lg border border-border text-xs text-secondary hover:text-foreground" onClick={() => setBatchOpen(false)}>取消</button>
+                <button
+                  className="h-8 px-4 rounded-lg bg-accent text-white text-xs font-medium hover:bg-accent/90 disabled:opacity-50"
+                  disabled={batchAddMut.isPending || batchSelected.size === 0}
+                  onClick={() => batchAddMut.mutate()}
+                >
+                  {batchAddMut.isPending ? '加入中…' : `批量加入 ${batchSelected.size || ''}`}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

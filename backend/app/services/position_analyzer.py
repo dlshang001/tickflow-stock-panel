@@ -17,7 +17,8 @@ from __future__ import annotations
 import json
 import logging
 import math
-from datetime import date
+import re
+from datetime import date, timedelta
 from typing import AsyncIterator
 
 import polars as pl
@@ -108,7 +109,6 @@ def _summarize_holding(repo, pos: dict, enriched_map: dict) -> dict | None:
     nearest_resistance = None
     try:
         start = date.today()
-        from datetime import timedelta
         df = repo.get_daily_asset(asset_type, symbol, start - timedelta(days=_KLINE_WINDOW * 2), start)
         if not df.is_empty():
             df = df.tail(_KLINE_WINDOW)
@@ -156,21 +156,94 @@ def _summarize_holding(repo, pos: dict, enriched_map: dict) -> dict | None:
     }
 
 
-def _build_market_snapshot(quote_service) -> dict:
-    """轻量大盘快照:主要指数 + 涨跌家数。失败则返回空,不阻断复盘。"""
-    snap: dict = {"indices": [], "breadth": None}
+def _build_market_snapshot(repo, quote_service) -> dict:
+    """大盘环境快照:复用大盘复盘的 build_market_overview,再压缩成精简结构。
+
+    包含:日期/情绪、主要指数涨跌、涨跌家数与强弱分布、成交额、涨跌停/连板、
+    领涨/领跌板块(行业+概念)。这是"持仓 vs 大盘"对照的客观依据。
+    任何环节失败都降级返回空结构,不阻断复盘。
+    """
+    empty = {
+        "as_of": None, "emotion": None, "radar": [], "indices": [], "breadth": None,
+        "distribution": [], "amount": None, "limit": None, "trend": None, "activity": None,
+        "boards": [], "top_gainers": [], "top_losers": [],
+        "leading_industries": [], "lagging_industries": [],
+        "leading_concepts": [], "lagging_concepts": [],
+    }
     try:
-        if quote_service is not None:
-            idx = quote_service.get_index_quotes()
-            rows = idx if isinstance(idx, list) else idx.get("rows", []) if isinstance(idx, dict) else []
-            for r in rows[:6]:
-                snap["indices"].append({
+        from app.services.market_overview_builder import build_market_overview
+
+        ov = build_market_overview(repo, quote_service=quote_service)
+        if not ov or not ov.get("as_of"):
+            return empty
+
+        def _rank_items(bucket: list[dict], limit: int = 6) -> list[dict]:
+            out = []
+            for it in (bucket or [])[:limit]:
+                leader = it.get("leader") or {}
+                out.append({
+                    "name": it.get("name"),
+                    "avg_pct": _safe_float(it.get("avg_pct")),
+                    "count": it.get("count"),
+                    "up_count": it.get("up_count"),
+                    "down_count": it.get("down_count"),
+                    "leader": leader.get("name"),
+                    "leader_pct": _safe_float(leader.get("change_pct")),
+                })
+            return out
+
+        def _top(rows: list[dict], limit: int = 6) -> list[dict]:
+            return [
+                {
                     "name": r.get("name"),
                     "change_pct": _safe_float(r.get("change_pct")),
-                })
+                    "amount": _safe_float(r.get("amount")),
+                    "turnover_rate": _safe_float(r.get("turnover_rate")),
+                }
+                for r in (rows or [])[:limit]
+            ]
+
+        lim = ov.get("limit") or {}
+        return {
+            "as_of": ov.get("as_of"),
+            "emotion": ov.get("emotion"),
+            "radar": ov.get("radar"),
+            "indices": [
+                {"name": ix.get("name"), "change_pct": _safe_float(ix.get("change_pct"))}
+                for ix in (ov.get("indices") or [])[:6]
+            ],
+            "breadth": ov.get("breadth"),
+            "distribution": ov.get("distribution"),
+            "amount": ov.get("amount"),
+            "limit": {
+                "limit_up": lim.get("limit_up"),
+                "limit_down": lim.get("limit_down"),
+                "broken": lim.get("broken"),
+                "max_boards": lim.get("max_boards"),
+                "seal_rate": _safe_float(lim.get("seal_rate")),
+                "tiers": [
+                    {"boards": t.get("boards"), "count": t.get("count"),
+                     "stocks": [s.get("name") for s in (t.get("stocks") or [])[:3]]}
+                    for t in (lim.get("tiers") or [])[:5]
+                ],
+            },
+            "trend": ov.get("trend"),
+            "activity": ov.get("activity"),
+            "boards": [
+                {"board": b.get("board"), "up_pct": _safe_float(b.get("up_pct")),
+                 "count": b.get("count"), "up": b.get("up"), "down": b.get("down")}
+                for b in (ov.get("boards") or [])
+            ],
+            "top_gainers": _top(ov.get("top_gainers")),
+            "top_losers": _top(ov.get("top_losers")),
+            "leading_industries": _rank_items((ov.get("industry_rank") or {}).get("leading")),
+            "lagging_industries": _rank_items((ov.get("industry_rank") or {}).get("lagging")),
+            "leading_concepts": _rank_items((ov.get("concept_rank") or {}).get("leading")),
+            "lagging_concepts": _rank_items((ov.get("concept_rank") or {}).get("lagging")),
+        }
     except Exception as e:  # noqa: BLE001
         logger.debug("position analyze market snapshot failed: %s", e)
-    return snap
+        return empty
 
 
 def _build_portfolio_summary(holdings: list[dict]) -> dict:
@@ -208,6 +281,190 @@ def _build_portfolio_summary(holdings: list[dict]) -> dict:
 
 
 # ================================================================
+# 行业 / 概念集中度(从内置 ext_data 映射归因)
+# ================================================================
+
+_DIMENSION_SEP = re.compile(r"[、,，;；|/\s]+")
+
+
+def _load_ext_dimension(data_dir, config_id: str, field: str) -> dict[str, list[str]]:
+    """读取内置 ext parquet(概念/行业),返回 symbol -> 维度值列表。
+
+    行业字段是 "一级-二级-三级" 分级,取一级作为行业归因;概念字段是分号分隔的多值。
+    读取失败(未同步数据)返回空 dict,不阻断复盘。
+    """
+    import polars as pl
+
+    path = data_dir / "ext_data" / config_id / "part.parquet"
+    if not path.exists():
+        return {}
+    try:
+        df = pl.read_parquet(path)
+        if df.is_empty() or field not in df.columns:
+            return {}
+        mapping: dict[str, list[str]] = {}
+        for rec in df.select(["symbol", field]).to_dicts():
+            sym = rec.get("symbol")
+            raw = rec.get(field)
+            if not sym or raw is None:
+                continue
+            values = [v.strip() for v in _DIMENSION_SEP.split(str(raw).strip()) if v.strip()]
+            if config_id == "ext_hy_ths":
+                # 行业分级 "银行-银行-股份制银行" → 取一级行业
+                values = [v.split("-")[0].strip() for v in values if v.strip()]
+            mapping[str(sym)] = [v for v in values if v]
+        return mapping
+    except Exception as e:  # noqa: BLE001
+        logger.debug("load ext dimension %s failed: %s", config_id, e)
+        return {}
+
+
+def _build_concentration(data_dir, holdings: list[dict]) -> dict:
+    """按市值占比统计行业/概念集中度。
+
+    返回 {"industry": [...], "concept": [...], "uncovered": [...]}
+    每项按市值占比降序:{"name", "symbols", "mv", "pct"}
+    """
+    total_mv = sum(h.get("market_value") or 0 for h in holdings)
+    if total_mv <= 0:
+        return {"industry": [], "concept": [], "uncovered": []}
+
+    industry_map = _load_ext_dimension(data_dir, "ext_hy_ths", "所属同花顺行业")
+    concept_map = _load_ext_dimension(data_dir, "ext_gn_ths", "所属概念")
+    uncovered: list[str] = []
+
+    def _aggregate(dim_map: dict[str, list[str]], multi: bool) -> list[dict]:
+        bucket: dict[str, dict] = {}
+        for h in holdings:
+            sym = h.get("symbol")
+            mv = h.get("market_value") or 0
+            dims = dim_map.get(sym, [])
+            if not dims:
+                continue
+            # 概念多值时市值均摊到每个概念,避免重复计总
+            weight = mv / len(dims) if multi else mv
+            for d in dims:
+                b = bucket.setdefault(d, {"name": d, "symbols": [], "mv": 0.0})
+                b["symbols"].append(sym)
+                b["mv"] += weight
+        out = []
+        for b in bucket.values():
+            out.append({
+                "name": b["name"],
+                "symbols": b["symbols"],
+                "mv": round(b["mv"], 2),
+                "pct": round(b["mv"] / total_mv * 100, 1),
+            })
+        out.sort(key=lambda x: x["mv"], reverse=True)
+        return out
+
+    covered = set(industry_map.keys())
+    for h in holdings:
+        if h.get("symbol") not in covered:
+            uncovered.append(h.get("symbol"))
+
+    return {
+        "industry": _aggregate(industry_map, multi=False)[:8],
+        "concept": _aggregate(concept_map, multi=True)[:8],
+        "uncovered": uncovered,
+    }
+
+
+def _build_sector_context(repo, data_dir, holdings: list[dict]) -> dict:
+    """把持仓所属行业/概念放到当日全市场板块强弱中做对照。
+
+    返回:
+    {
+      "industries": [{"name","holding_mv","holding_pct","market_avg_pct","market_count",
+                      "rank","total","leader_name","leader_pct","is_leading","is_lagging"}],
+      "concepts":   [同上],
+    }
+    rank/total 为该板块在全市场所有板块中按平均涨幅的排名(1=最强);
+    is_leading/is_lagging 标记是否在全市场领涨/领跌前列。
+    数据缺失(未同步 ext 或行情)返回空列表,不阻断复盘。
+    """
+    try:
+        from app.services.screener import ScreenerService
+
+        svc = ScreenerService(repo)
+        as_of = svc.latest_date()
+        if not as_of:
+            return {"industries": [], "concepts": []}
+        df = svc._load_enriched_for_date(as_of)
+        if df is None or df.is_empty():
+            return {"industries": [], "concepts": []}
+        # 只取聚合需要的列,构造 quote_map(symbol -> change_pct/name)
+        cols = [c for c in ("symbol", "name", "change_pct", "amount") if c in df.columns]
+        quote_map: dict[str, dict] = {}
+        for rec in df.select(cols).to_dicts():
+            sym = str(rec.get("symbol") or "")
+            if sym:
+                quote_map[sym] = rec
+    except Exception as e:  # noqa: BLE001
+        logger.debug("position sector context load quotes failed: %s", e)
+        return {"industries": [], "concepts": []}
+
+    def _rank_dimension(config_id: str, field: str) -> list[dict]:
+        dim_map = _load_ext_dimension(data_dir, config_id, field)
+        if not dim_map or not quote_map:
+            return []
+
+        # 全市场聚合每个板块的平均涨幅
+        groups: dict[str, list[dict]] = {}
+        for sym, rec in quote_map.items():
+            for d in dim_map.get(sym, []):
+                groups.setdefault(d, []).append(rec)
+
+        scored: list[dict] = []
+        for name, recs in groups.items():
+            pcts = [_safe_float(r.get("change_pct")) for r in recs]
+            pcts = [p for p in pcts if p is not None]
+            if not pcts:
+                continue
+            leader = max(recs, key=lambda r: _safe_float(r.get("change_pct")) or -999)
+            scored.append({
+                "name": name,
+                "market_avg_pct": round(sum(pcts) / len(pcts), 3),
+                "market_count": len(recs),
+                "leader_name": leader.get("name"),
+                "leader_pct": _safe_float(leader.get("change_pct")),
+            })
+        # 按平均涨幅排名(1=最强)
+        scored.sort(key=lambda x: x["market_avg_pct"], reverse=True)
+        total = len(scored)
+        for i, item in enumerate(scored):
+            item["rank"] = i + 1
+            item["total"] = total
+            item["is_leading"] = i < 5
+            item["is_lagging"] = i >= total - 5 if total >= 5 else False
+
+        rank_by_name = {item["name"]: item for item in scored}
+
+        # 只保留持仓涉及的板块,叠加该板块下持仓的合计市值
+        total_mv = sum(h.get("market_value") or 0 for h in holdings) or 1
+        out: list[dict] = []
+        for name, info in rank_by_name.items():
+            members = [h for h in holdings if name in dim_map.get(h.get("symbol") or "", [])]
+            if not members:
+                continue
+            holding_mv = sum(h.get("market_value") or 0 for h in members)
+            out.append({
+                **info,
+                "holding_mv": round(holding_mv, 2),
+                "holding_pct": round(holding_mv / total_mv * 100, 1),
+                "holding_symbols": [h.get("symbol") for h in members],
+            })
+        # 按持仓市值降序
+        out.sort(key=lambda x: x["holding_mv"], reverse=True)
+        return out
+
+    return {
+        "industries": _rank_dimension("ext_hy_ths", "所属同花顺行业"),
+        "concepts": _rank_dimension("ext_gn_ths", "所属概念"),
+    }
+
+
+# ================================================================
 # 系统提示词 —— 账户组合客观复盘框架
 # 红线:只做客观状态陈述,不输出任何买卖/仓位/止损止盈建议。
 # ================================================================
@@ -227,8 +484,13 @@ _SYSTEM_PROMPT = """你是一位拥有 15 年 A 股研究经验的组合复盘�
 ### 1. 📊 账户概览(2-4 句)
 基于提供的账户汇总数据,客观描述:总市值、总浮盈亏(额与比例)、今日涨跌只数对比、盈利/亏损只数、整体仓位的盈亏分布。数据说话,不评价操作好坏。
 
-### 2. 🌡️ 大盘环境与持仓对照(2-3 句)
-基于提供的主要指数涨跌,客观描述今日大盘环境,并客观陈述持仓整体是强于还是弱于大盘(用今日上涨只数占比与指数对比)。不臆测后市。
+### 2. 🌡️ 大盘环境与持仓对照(2-4 句)
+基于提供的"大盘环境"数据,客观描述今日盘面:
+- 主要指数涨跌(上证/深成/创业板/科创等)与全市场情绪(emotion)
+- 涨跌家数与赚钱效应(上涨占比、平均涨幅、强势/弱势股数量)
+- 成交额与量能、涨跌停/连板高度、领涨与领跌的行业/概念
+- 据此客观陈述:持仓整体今日是强于还是弱于大盘(用持仓上涨只数占比 vs 全市场上涨占比、持仓平均涨幅 vs 全市场平均涨幅对比)
+只做客观对照,不臆测后市、不给操作建议。若大盘环境数据为空(如非交易日/未同步),直接说明"暂无大盘数据",不要编造指数涨跌。
 
 ### 3. 📈 持仓逐只状态
 对每一只持仓,用 1-2 句客观描述其:浮动盈亏(额/比例)、持仓天数、趋势标签、距当前价最近的支撑/压力位、RSI/量能等指标状态。
@@ -236,22 +498,33 @@ _SYSTEM_PROMPT = """你是一位拥有 15 年 A 股研究经验的组合复盘�
 - 表格之后,对浮盈亏较大或技术状态值得注意的标的用 2-4 句客观补充
 - 每条只陈述事实,不写操作建议
 
-### 4. ⚠️ 风险点与结构观察
+### 4. 🧩 行业/概念集中度与板块强弱
+基于提供的"板块归因"和"持仓板块全市场强弱对照"数据,客观描述:
+- 持仓主要集中在哪些行业(列出占比靠前的行业及其占比)
+- 概念暴露(若有,列出占比较高的概念)
+- 是否存在单一行业/概念占比过高(如某行业占比超过 40%),客观提示集中度
+- **持仓板块当日在全市场的强弱**:对照"持仓板块全市场强弱"中的 rank/market_avg_pct/is_leading/is_lagging,
+  客观说明持仓主要押在当日强势板块还是弱势板块(如"持仓占比 40% 的医药行业今日平均+2.1%,在全市场 X 个行业中排第 Y,处于领涨前列")
+- 可引用板块龙头(leader_name/leader_pct)佐证板块强度
+本节是第 5 节"风险点"中结构维度的数据支撑;**不下"应该分散/换仓/追涨"等操作结论**。
+若板块归因或强弱数据为空,直接说明"行业/概念数据未同步,暂无法评估",不要编造排名。
+
+### 5. ⚠️ 风险点
 客观列出(不超过 5 条):
 - 盈亏分布是否分化(单只贡献过大/拖后腿)
+- 行业/概念是否过度集中(引用第 4 节数据)
 - 哪些标的跌破关键均线或距支撑位较近
 - 哪些标的 RSI 超买/超卖或量能异常
-- 持仓只数集中度(是否过度集中于少数标的)
 只做客观提示,不下"应该减仓"等结论。
 
-### 5. 🔍 值得关注的客观信号
+### 6. 🔍 值得关注的客观信号
 列出后续可观察的客观量价信号(如某均线得失、某压力位能否放量突破、量能变化),**不附任何操作结论**。
 
 ## 准则
 
 1. 数据说话:每个判断引用具体数值,严禁空泛套话
 2. 客观中立:只陈述状态与风险,不输出任何交易指令
-3. 简明有密度:总字数 800-1500 字,便于扫读
+3. 简明有密度:总字数 1000-1800 字,便于扫读
 4. 无数据的维度直接说明"数据不足",不要编造
 
 ## 免责声明
@@ -260,7 +533,7 @@ _SYSTEM_PROMPT = """你是一位拥有 15 年 A 股研究经验的组合复盘�
 现在请基于下方数据进行复盘。"""
 
 
-def _build_user_prompt(summary: dict, holdings: list[dict], market: dict, focus: str) -> str:
+def _build_user_prompt(summary: dict, holdings: list[dict], market: dict, concentration: dict, sector_context: dict, focus: str) -> str:
     parts: list[str] = [
         f"复盘日期: {date.today().isoformat()}",
         "",
@@ -274,7 +547,24 @@ def _build_user_prompt(summary: dict, holdings: list[dict], market: dict, focus:
         json.dumps(holdings, ensure_ascii=False),
         "```",
         "",
-        "## 大盘环境",
+        "## 板块归因(行业/概念按持仓市值占比统计,pct 为占总市值百分比)",
+        "```json",
+        json.dumps(concentration, ensure_ascii=False),
+        "```",
+        "",
+        "## 持仓板块的全市场强弱对照(关键)",
+        "下面只列出持仓涉及的行业/概念,并给出其在当日全市场所有板块中的表现:",
+        "- market_avg_pct:该板块当日全市场成分股平均涨幅",
+        "- rank/total:该板块在全市场所有板块按平均涨幅的排名(1=最强)",
+        "- is_leading/is_lagging:是否处于全市场领涨/领跌前列",
+        "- leader_name/leader_pct:该板块当日龙头股及其涨幅",
+        "- holding_pct:该板块占持仓总市值比例",
+        "据此可客观判断:持仓是押在当日强势板块还是弱势板块。",
+        "```json",
+        json.dumps(sector_context, ensure_ascii=False),
+        "```",
+        "",
+        "## 大盘环境(看板页数据:指数/情绪雷达/涨跌分布/连板梯队/活跃度/领涨领跌板块)",
         "```json",
         json.dumps(market, ensure_ascii=False),
         "```",
@@ -340,13 +630,25 @@ async def analyze_positions_stream(
         return
 
     summary = _build_portfolio_summary(holdings)
-    market = _build_market_snapshot(quote_service)
+    market = _build_market_snapshot(repo, quote_service)
+    try:
+        concentration = _build_concentration(repo.store.data_dir, holdings)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("build concentration failed: %s", e)
+        concentration = {"industry": [], "concept": [], "uncovered": []}
+    try:
+        sector_context = _build_sector_context(repo, repo.store.data_dir, holdings)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("build sector context failed: %s", e)
+        sector_context = {"industries": [], "concepts": []}
 
     # 3. meta
     yield json.dumps({
         "type": "meta",
         "count": summary["count"],
         "summary": summary,
+        "concentration": concentration,
+        "sector_context": sector_context,
         "as_of": date.today().isoformat(),
     }, ensure_ascii=False)
 
@@ -354,7 +656,7 @@ async def analyze_positions_stream(
     try:
         from app.services.ai_provider import stream_ai_text
 
-        user_prompt = _build_user_prompt(summary, holdings, market, focus)
+        user_prompt = _build_user_prompt(summary, holdings, market, concentration, sector_context, focus)
         async for delta in stream_ai_text(
             [
                 {"role": "system", "content": _SYSTEM_PROMPT},
@@ -370,3 +672,32 @@ async def analyze_positions_stream(
         return
 
     yield json.dumps({"type": "done"}, ensure_ascii=False)
+
+
+async def analyze_positions_once(
+    repo,
+    quote_service,
+    pos_rows: list[dict],
+    focus: str = "",
+) -> tuple[str | None, dict]:
+    """非流式持仓复盘 —— 供定时任务/推送等只需最终文本的调用方。
+
+    返回 (content, meta):content 为完整 Markdown,失败为 None;
+    meta 含 count/summary/concentration/as_of。
+    """
+    content_parts: list[str] = []
+    meta: dict = {}
+    async for chunk in analyze_positions_stream(repo, quote_service, pos_rows, focus):
+        try:
+            evt = json.loads(chunk)
+        except Exception:  # noqa: BLE001
+            continue
+        t = evt.get("type")
+        if t == "meta":
+            meta = evt
+        elif t == "delta":
+            content_parts.append(evt.get("content", ""))
+        elif t == "error":
+            return None, meta
+    content = "".join(content_parts).strip()
+    return (content or None), meta

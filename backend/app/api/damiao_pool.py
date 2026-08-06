@@ -44,6 +44,21 @@ class ExitRequest(BaseModel):
     exit_price: float | None = None
 
 
+class BatchParseRequest(BaseModel):
+    text: str
+
+
+class BatchAddItem(BaseModel):
+    symbol: str
+    category: str = "new_watch"
+    note: str = ""
+
+
+class BatchAddRequest(BaseModel):
+    items: list[BatchAddItem]
+    source_date: str = ""
+
+
 def _with_names(rows: list[dict], request: Request) -> list[dict]:
     if not rows:
         return rows
@@ -78,6 +93,40 @@ def add_one(req: AddRequest, request: Request):
         anchor_price=float(anchor) if anchor is not None else None,
     )
     return {"rows": _with_names(rows, request), "anchor_price": anchor}
+
+
+@router.post("/batch-parse")
+def batch_parse(req: BatchParseRequest, request: Request):
+    """预览解析:把群主预案文本解析成候选股票列表(不落库)。"""
+    from app.services import damiao_batch
+    try:
+        inst_df = request.app.state.repo.get_instruments()
+        items = damiao_batch.parse_text(req.text or "", inst_df)
+        return {"items": items, "count": len(items)}
+    except Exception as e:  # noqa: BLE001
+        logger.exception("batch parse failed: %s", e)
+        return {"items": [], "count": 0, "error": str(e)}
+
+
+@router.post("/batch-add")
+def batch_add(req: BatchAddRequest, request: Request):
+    """确认批量入库:按用户确认后的 items 逐条 add,自动取锚定价。"""
+    capset = getattr(request.app.state, "capabilities", None)
+    repo = request.app.state.repo
+    added: list[dict] = []
+    for item in req.items:
+        category = item.category if item.category in VALID_CATEGORIES else "new_watch"
+        anchor = damiao_pool.resolve_anchor_price(item.symbol, repo, capset)
+        damiao_pool.add(
+            symbol=item.symbol,
+            source_date=req.source_date,
+            category=category,
+            note=item.note,
+            anchor_price=float(anchor) if anchor is not None else None,
+        )
+        added.append({"symbol": item.symbol, "category": category, "anchor_price": anchor})
+    rows = _with_names(damiao_pool.list_rows(), request)
+    return {"rows": rows, "added": added, "count": len(added)}
 
 
 @router.patch("/{row_id}")
