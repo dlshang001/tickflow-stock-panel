@@ -38,6 +38,8 @@ dependencies = [
     # Watchlist screenshot OCR (Tesseract)
     "pytesseract>=0.3.10",
     "Pillow>=10.0",
+    # 个股搜索拼音简拼匹配
+    "pypinyin>=0.50",
 ]
 
 [project.optional-dependencies]

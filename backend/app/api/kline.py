@@ -18,6 +18,39 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/kline", tags=["kline"])
 
 
+# 拼音首字母缓存: 按 (df 对象 id, 名称指纹) 缓存 initials 列表,
+# instruments 缓存不变时复用, 避免每次搜索对 5000+ 标的重算拼音。
+_PY_INITIALS_CACHE: dict[tuple[int, int], list[str]] = {}
+
+
+def _get_initial_rows(df) -> list[str]:
+    """惰性为 instruments DataFrame 的 name 列生成大写拼音首字母, 带缓存。"""
+    try:
+        from pypinyin import Style, lazy_pinyin
+    except Exception:
+        return []
+
+    names = df["name"].to_list()
+    # 用名称列表长度 + 前/后若干名称构造指纹, 命中缓存即可复用
+    fingerprint = hash((len(names), tuple(names[:5]), tuple(names[-5:])))
+    key = (id(df), fingerprint)
+    cached = _PY_INITIALS_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    def _initials(name: str) -> str:
+        if not name:
+            return ""
+        return "".join(s[0] for s in lazy_pinyin(name, style=Style.FIRST_LETTER)).upper()
+
+    rows = [_initials(str(n)) for n in names]
+    # 控制缓存大小, 只保留最近 8 份(不同 asset_type 的 df 各一份)
+    if len(_PY_INITIALS_CACHE) > 8:
+        _PY_INITIALS_CACHE.clear()
+    _PY_INITIALS_CACHE[key] = rows
+    return rows
+
+
 def _minute_allowed(capset) -> bool:
     """是否有分钟K权限 (TickFlow Pro+ 或 custom minute 源)。"""
     from app.tickflow.capabilities import Cap
@@ -66,9 +99,16 @@ def search_instruments(
         return {"results": []}
     df = pl.concat(parts, how="vertical")
 
-    keyword = q.strip().upper()
+    # 拼音首字母列(惰性计算并缓存), 支持 "trt" 匹配 "同仁堂"
+    initials = _get_initial_rows(df)
+    has_pinyin = len(initials) == df.height
+    if has_pinyin:
+        df = df.with_columns(pl.Series("py_initials", initials))
 
-    # code/symbol 前缀优先，再 name 包含匹配
+    keyword = q.strip().upper()
+    is_ascii = keyword.isascii()
+
+    # code/symbol 前缀优先，再 name 包含匹配; 纯 ASCII 关键词额外匹配拼音首字母
     prefix_mask = (
         pl.col("code").str.starts_with(keyword)
         | pl.col("symbol").str.to_uppercase().str.starts_with(keyword)
@@ -78,6 +118,10 @@ def search_instruments(
         | pl.col("symbol").str.to_uppercase().str.contains(keyword, literal=True)
         | pl.col("name").str.contains(keyword, literal=True)
     )
+    if has_pinyin and is_ascii:
+        # 拼音: 前缀优先(如 trt 命中同仁堂), 包含次之(如 rt 命中同仁堂)
+        prefix_mask = prefix_mask | pl.col("py_initials").str.starts_with(keyword)
+        contains_mask = contains_mask | pl.col("py_initials").str.contains(keyword, literal=True)
 
     # 前缀匹配优先，剩余名额用包含匹配补充
     prefix_hits = df.filter(prefix_mask).head(limit)

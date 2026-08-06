@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>damiao 分支 UI 预览 · 大喵票池 / 持仓</title>
+<style>
+  :root {
+    --bg: #0f0f14;
+    --panel: #16161d;
+    --elevated: #1d1d27;
+    --border: #2a2a36;
+    --fg: #e6e6ee;
+    --muted: #8b8b9c;
+    --brand: #8B5CF6;
+    --up: #ef4444;
+    --down: #22c55e;
+    --accent-blue: #3b82f6;
+    --accent-amber: #f59e0b;
+    --accent-cyan: #06b6d4;
+    --accent-pink: #ec4899;
+    --accent-slate: #64748b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--fg); font-size: 13px;
+    display: flex; min-height: 100vh;
+  }
+  /* 侧边栏 */
+  .sidebar {
+    width: 200px; background: var(--panel); border-right: 1px solid var(--border);
+    padding: 16px 10px; flex-shrink: 0; display: flex; flex-direction: column; gap: 2px;
+  }
+  .logo { font-size: 16px; font-weight: 700; color: var(--brand); padding: 8px 12px 18px; display:flex; align-items:center; gap:8px;}
+  .nav-item {
+    display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px;
+    color: var(--muted); cursor: pointer; font-size: 13px;
+  }
+  .nav-item:hover { background: var(--elevated); color: var(--fg); }
+  .nav-item.active { background: rgba(139,92,246,.15); color: var(--brand); font-weight: 600; }
+  .nav-item .ic { width: 16px; text-align: center; }
+  .nav-divider { height: 1px; background: var(--border); margin: 10px 6px; }
+  .new-badge { background: var(--brand); color:#fff; font-size:10px; padding:1px 6px; border-radius: 10px; margin-left:auto;}
+
+  /* 主区 */
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .topbar {
+    height: 48px; border-bottom: 1px solid var(--border); display: flex; align-items: center;
+    padding: 0 20px; gap: 20px; background: var(--panel);
+  }
+  .topbar .idx { font-size: 12px; color: var(--muted); }
+  .topbar .idx b { color: var(--fg); margin-left: 6px; }
+  .topbar .idx .up { color: var(--up); }
+  .topbar .idx .down { color: var(--down); }
+
+  .page { padding: 18px 20px; overflow: auto; }
+  .page-head { display:flex; align-items:center; justify-content:space-between; margin-bottom: 14px;}
+  .page-title { font-size: 18px; font-weight: 700; display:flex; align-items:center; gap:10px;}
+  .page-title .sub { font-size: 12px; color: var(--muted); font-weight: 400;}
+  .page-actions { display:flex; gap:8px; align-items:center;}
+
+  .btn {
+    padding: 7px 13px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--elevated); color: var(--fg); cursor: pointer; font-size: 12px;
+  }
+  .btn:hover { border-color: var(--brand); }
+  .btn.primary { background: var(--brand); border-color: var(--brand); color:#fff; }
+  .btn.ghost { background: transparent; }
+  .input, select {
+    background: var(--elevated); border: 1px solid var(--border); color: var(--fg);
+    padding: 7px 10px; border-radius: 8px; font-size: 12px; outline: none;
+  }
+  .input:focus, select:focus { border-color: var(--brand); }
+
+  /* 标签页 */
+  .tabs { display:flex; gap:4px; border-bottom: 1px solid var(--border); margin-bottom: 14px; overflow-x:auto;}
+  .tab {
+    padding: 9px 14px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent;
+    white-space: nowrap; font-size: 13px; display:flex; align-items:center; gap:7px;
+  }
+  .tab:hover { color: var(--fg); }
+  .tab.active { color: var(--brand); border-bottom-color: var(--brand); font-weight: 600;}
+  .tab .count { background: var(--elevated); color: var(--muted); font-size: 11px; padding: 1px 7px; border-radius: 10px;}
+  .tab.active .count { background: rgba(139,92,246,.18); color: var(--brand);}
+
+  /* 统计条 */
+  .stats { display:grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 16px;}
+  .stat {
+    background: var(--panel); border:1px solid var(--border); border-radius: 12px; padding: 12px 14px;
+  }
+  .stat .label { font-size: 11px; color: var(--muted); margin-bottom: 6px;}
+  .stat .value { font-size: 18px; font-weight: 700; }
+  .stat .sub { font-size: 11px; color: var(--muted); margin-top: 3px;}
+
+  /* 分类筛选 */
+  .filters { display:flex; gap:6px; margin-bottom: 12px; flex-wrap:wrap; align-items:center;}
+  .chip {
+    padding: 4px 11px; border-radius: 14px; border:1px solid var(--border); background: var(--elevated);
+    color: var(--muted); font-size: 12px; cursor: pointer;
+  }
+  .chip.active { background: rgba(139,92,246,.15); border-color: var(--brand); color: var(--brand);}
+
+  /* 表格 */
+  table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 12px; overflow: hidden; border: 1px solid var(--border);}
+  thead th {
+    text-align: center; font-size: 12px; font-weight: 600; color: var(--muted);
+    padding: 11px 10px; border-bottom: 1px solid var(--border); background: var(--panel); position: sticky; top:0;
+  }
+  thead th.left { text-align: left; padding-left: 16px;}
+  tbody td { padding: 11px 10px; text-align: center; border-bottom: 1px solid var(--border); font-size: 13px;}
+  tbody td.left { text-align: left; padding-left: 16px;}
+  tbody tr:hover { background: var(--elevated); }
+  tbody tr:last-child td { border-bottom: none; }
+  .sym .code { font-weight: 600; }
+  .sym .name { color: var(--muted); font-size: 11px; margin-left: 8px;}
+  .up { color: var(--up); }
+  .down { color: var(--down); }
+  .flat { color: var(--muted); }
+  .tag { display:inline-block; padding: 2px 9px; border-radius: 10px; font-size: 11px; font-weight: 500; white-space:nowrap;}
+  .tag.new_watch { background: rgba(59,130,246,.15); color: #60a5fa;}
+  .tag.new_open { background: rgba(239,68,68,.15); color: #f87171;}
+  .tag.holding_todo { background: rgba(245,158,11,.15); color: #fbbf24;}
+  .tag.old_deng { background: rgba(100,116,139,.18); color: #94a3b8;}
+  .tag.t_add { background: rgba(6,182,212,.15); color: #22d3ee;}
+  .tag.take_profit { background: rgba(239,68,68,.18); color:#f87171;}
+  .tag.stop_loss { background: rgba(34,197,94,.18); color:#4ade80;}
+  .tag.closed { background: rgba(100,116,139,.2); color:#94a3b8;}
+  .strategy { color: var(--muted); font-size: 12px; max-width: 200px; text-align:left;}
+  .row-action { color: var(--muted); cursor:pointer; font-size:12px; padding: 0 4px;}
+  .row-action:hover { color: var(--brand);}
+  .exit-mark { font-size:10px; padding:1px 6px; border-radius:8px; background:var(--elevated); color:var(--muted); margin-left:6px;}
+
+  /* 持仓汇总条 */
+  .summary { display:flex; gap:24px; background: linear-gradient(135deg, rgba(139,92,246,.12), rgba(59,130,246,.08)); border:1px solid var(--border); border-radius: 12px; padding: 14px 20px; margin-bottom: 16px; align-items:center;}
+  .summary .item .label { font-size:11px; color:var(--muted);}
+  .summary .item .val { font-size:18px; font-weight:700; margin-top:3px;}
+  .summary .sep { width:1px; height:34px; background: var(--border);}
+
+  .hidden { display:none !important;}
+  .note { font-size:11px; color:var(--muted); margin-top:10px;}
+</style>
+</head>
+<body>
+
+<!-- 侧边栏 -->
+<aside class="sidebar">
+  <div class="logo">📊 TickFlow</div>
+  <div class="nav-item"><span class="ic">▦</span> 看板</div>
+  <div class="nav-item"><span class="ic">★</span> 自选</div>
+  <div class="nav-item active"><span class="ic">🐱</span> 大喵票池 <span class="new-badge">新</span></div>
+  <div class="nav-item" id="navPos"><span class="ic">👛</span> 持仓 <span class="new-badge">新</span></div>
+  <div class="nav-item"><span class="ic">🔍</span> 策略</div>
+  <div class="nav-item"><span class="ic">⟲</span> 回测</div>
+  <div class="nav-item"><span class="ic">📈</span> 个股分析</div>
+  <div class="nav-item"><span class="ic">🔥</span> 连板梯队</div>
+  <div class="nav-divider"></div>
+  <div class="nav-item"><span class="ic">📡</span> 监控中心</div>
+  <div class="nav-item"><span class="ic">📖</span> 复盘</div>
+  <div class="nav-item"><span class="ic">🗄</span> 数据</div>
+</aside>
+
+<!-- 主区 -->
+<div class="main">
+  <div class="topbar">
+    <span class="idx">上证 <b class="up">3312.45 <span class="up">+0.82%</span></b></span>
+    <span class="idx">深成 <b class="up">10245.1 <span class="up">+1.13%</span></b></span>
+    <span class="idx">创业 <b class="down">2014.2 <span class="down">-0.31%</span></b></span>
+    <span class="idx" style="margin-left:auto">🔴 实时行情连接中 · 2026-08-04 17:28</span>
+  </div>
+
+  <!-- ========== 大喵票池页 ========== -->
+  <div class="page" id="pageDamiao">
+    <div class="page-head">
+      <div class="page-title">
+        🐱 大喵观察票池
+        <span class="sub">追踪群主每日预案 · 按推荐事件记录 · 自动锚定入池价</span>
+      </div>
+      <div class="page-actions">
+        <input class="input" placeholder="代码 如 600085.SH" style="width:150px"/>
+        <select class="input">
+          <option>新观察</option><option>新开仓</option><option>持仓处理</option><option>老登票</option><option>可踢</option>
+        </select>
+        <input class="input" type="date" value="2026-08-04" style="width:140px"/>
+        <input class="input" placeholder="策略提示，如 五日线可低吸" style="width:200px"/>
+        <button class="btn primary">+ 加入票池</button>
+        <button class="btn ghost">⚙ 列</button>
+      </div>
+    </div>
+
+    <!-- 日期标签页 -->
+    <div class="tabs">
+      <div class="tab active" data-tab="all">全部 <span class="count">14</span></div>
+      <div class="tab" data-tab="d0804">08-04 今日 <span class="count">6</span></div>
+      <div class="tab" data-tab="d0803">08-03 <span class="count">5</span></div>
+      <div class="tab" data-tab="d0802">08-02 <span class="count">4</span></div>
+      <div class="tab" data-tab="d0801">08-01 <span class="count">3</span></div>
+      <div class="tab" data-tab="d0731">07-31 <span class="count">2</span></div>
+      <div class="tab" data-tab="closed" style="margin-left:auto">✅ 已收官 <span class="count">8</span></div>
+    </div>
+
+    <!-- 统计条 -->
+    <div class="stats">
+      <div class="stat"><div class="label">只数</div><div class="value">14</div><div class="sub">未收官 6 · 已收官 8</div></div>
+      <div class="stat"><div class="label">平均入池盈亏</div><div class="value up">+4.82%</div><div class="sub">基于当前实时价</div></div>
+      <div class="stat"><div class="label">上涨 / 下跌</div><div class="value"><span class="up">9</span> / <span class="down">5</span></div><div class="sub">平盘 0</div></div>
+      <div class="stat"><div class="label">胜率</div><div class="value up">64.3%</div><div class="sub">9 / 14 盈利</div></div>
+      <div class="stat"><div class="label">最佳</div><div class="value up">浪潮信息 <span class="up">+12.4%</span></div><div class="sub">08-04 新观察</div></div>
+      <div class="stat"><div class="label">最差</div><div class="value down">利欧股份 <span class="down">-5.1%</span></div><div class="sub">08-03 持仓处理</div></div>
+    </div>
+
+    <!-- 分类筛选 -->
+    <div class="filters">
+      <span style="color:var(--muted); font-size:12px; margin-right:4px;">分类：</span>
+      <span class="chip active">全部</span>
+      <span class="chip">新观察</span>
+      <span class="chip">新开仓</span>
+      <span class="chip">持仓处理</span>
+      <span class="chip">老登票</span>
+      <span class="chip">可踢</span>
+      <span style="margin-left:auto"><label class="chip" style="display:inline-flex;align-items:center;gap:5px;"><input type="checkbox" checked/> 隐藏已收官</label></span>
+    </div>
+
+    <!-- 表格 -->
+    <table>
+      <thead>
+        <tr>
+          <th class="left">代码/名称</th>
+          <th>分类</th>
+          <th>提及日期</th>
+          <th>现价</th>
+          <th>今涨跌</th>
+          <th>入池盈亏</th>
+          <th>距MA5</th>
+          <th>锚定价</th>
+          <th>量比</th>
+          <th>RSI14</th>
+          <th class="left" style="text-align:left; padding-left:14px;">策略提示</th>
+          <th>信号</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="left sym"><span class="code">000977.SZ</span><span class="name">浪潮信息</span></td>
+          <td><span class="tag new_open">新开仓</span></td>
+          <td>08-04</td>
+          <td>38.42</td>
+          <td class="up">+3.21%</td>
+          <td class="up">+12.40%</td>
+          <td class="up">+3.8%</td>
+          <td>34.18</td>
+          <td>2.14</td>
+          <td>68.2</td>
+          <td class="strategy">低吸</td>
+          <td class="up">放量</td>
+          <td><span class="row-action">编辑</span><span class="row-action">收官</span><span class="row-action">→持仓</span></td>
+        </tr>
+        <tr>
+          <td class="left sym"><span class="code">300083.SZ</span><span class="name">四会富士</span></td>
+          <td><span class="tag new_open">新开仓</span></td>
+          <td>08-04</td>
+          <td>25.16</td>
+          <td class="up">+1.85%</td>
+          <td class="up">+2.03%</td>
+          <td class="flat">+0.2%</td>
+          <td>24.66</td>
+          <td>1.32</td>
+          <td>55.4</td>
+          <td class="strategy">尾盘埋伏</td>
+          <td>—</td>
+          <td><span class="row-action">编辑</span><span class="row-action">收官</span><span class="row-action">→持仓</span></td>
+        </tr>
+        <tr>
+          <td class="left sym"><span class="code">600085.SH</span><span class="name">同仁堂</span></td>
+          <td><span class="tag new_watch">新观察</span></td>
+          <td>08-04</td>
+          <td>42.10</td>
+          <td class="up">+0.92%</td>
+          <td class="up">+0.92%</td>
+          <td class="up">+1.1%</td>
+          <td>41.72</td>
+          <td>0.88</td>
+          <td>52.1</td>
+          <td class="strategy">医药低位趋势，五日线可看</td>
+          <td>—</td>
+          <td><span class="row-action">编辑</span><span class="row-action">收官</span><span class="row-action">→持仓</span></td>
+        </tr>
+        <tr>
+          <td class="left sym"><span class="code">002262.SZ</span><span class="name">恩华药业</span></td>
+          <td><span class="tag new_watch">新观察</span></td>
+          <td>08-04</td>
+          <td>18.64</td>
+          <td class="down">-0.32%</td>
+          <td class="down">-0.43%</td>
+          <td class="flat">-0.1%</td>
+          <td>18.72</td>
+          <td>1.05</td>
+          <td>48.6</td>
+          <td class="strategy">五日线可低吸</td>
+          <td>—</td>
+          <td><span class="row-action">编辑</span><span class="row-action">收官</span><span class="row-action">→持仓</span></td>
+        </tr>
+        <tr>
+          <td class="left sym"><span class="code">300058.SZ</span><span class="name">蓝色光标</span></td>
+          <td><span class="tag t_add">可踢</span></td>
+          <td>08-04</td>
+          <td>9.82</td>
+          <td class="up">+4.13%</td>
+          <td class="up">+6.70%</td>
+          <td class="up">+4.5%</td>
+          <td>9.20</td>
+          <td>3.01</td>
+          <td>72.8</td>
+          <td class="strategy">今日可踢</td>
+          <td class="up">量价齐升</td>
+          <td><span class="row-action">编辑</span><span class="row-action">收官</span><span class="row-action">→持仓</span></td>
+        </tr>
+        <tr>
+          <td class="left sym"><span class="code">002896.SZ</span><span class="name">中大力德</span></td>
+          <td><span class="tag holding_todo">持仓处理</span></td>
+          <td>08-04</td>
+          <td>31.05</td>
+          <td class="down">-2.10%</td>
+          <td class="flat">—</td>
+          <td class="down">-3.2%</td>
+          <td class="flat">—</td>
+          <td>1.87</td>
+          <td>44.2</td>
+          <td class="strategy">断板以后横住再说</td>
+          <td class="down">走弱</td>
+          <td><span class="row-action">编辑</span><span class="row-action">收官</span><span class="row-action">→持仓</span></td>
+        </tr>
+        <tr>
+          <td class="left sym"><span class="code">603259.SH</span><span class="name">药明康德</span></td>
+          <td><span class="tag holding_todo">持仓处理</span></td>
+          <td>08-03</td>
+          <td>55.30</td>
+          <td class="up">+10.01%</td>
+          <td class="up">+8.60%</td>
+          <td class="up">+6.1%</td>
+          <td>50.92</td>
+          <td>4.22</td>
+          <td>78.4</td>
+          <td class="strategy">上板留</td>
+          <td class="up">涨停</td>
+          <td><span class="row-action">编辑</span><span class="row-action">收官</span><span class="row-action">→持仓</span></td>
+        </tr>
+        <tr>
+          <td class="left sym"><span class="code">002131.SZ</span><span class="name">利欧股份</span></td>
+          <td><span class="tag holding_todo">持仓处理</span></td>
+          <td>08-03</td>
+          <td>2.98</td>
+          <td class="down">-1.20%</td>
+          <td class="down">-5.10%</td>
+          <td class="down">-4.0%</td>
+          <td>3.14</td>
+          <td>0.76</td>
+          <td>38.9</td>
+          <td class="strategy">不上板离场</td>
+          <td class="down">弱势</td>
+          <td><span class="row-action">编辑</span><span class="row-action">收官</span><span class="row-action">→持仓</span></td>
+        </tr>
+        <!-- 已收官示例（灰显） -->
+        <tr style="opacity:.6">
+          <td class="left sym"><span class="code">601858.SH</span><span class="name">中国科传</span><span class="exit-mark">已止盈</span></td>
+          <td><span class="tag take_profit">止盈</span></td>
+          <td>07-29</td>
+          <td>22.40</td>
+          <td class="up">+2.10%</td>
+          <td class="up">+15.20% (收官)</td>
+          <td>—</td>
+          <td>19.45</td>
+          <td>—</td>
+          <td>—</td>
+          <td class="strategy">二连板，不连板离场 · 收官价 22.40</td>
+          <td>—</td>
+          <td><span class="row-action">编辑</span><span class="row-action">删除</span></td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="note">* 以上为静态示例数据。入池盈亏 = (现价 − 锚定价) / 锚定价；已收官行显示收官收益并灰显。中大力德锚定价为 null（实时价与收盘价均未取到），显示“—”，可手动补填。</div>
+  </div>
+
+  <!-- ========== 持仓页 ========== -->
+  <div class="page hidden" id="pagePos">
+    <div class="page-head">
+      <div class="page-title">
+        👛 持仓
+        <span class="sub">当前持仓清单 · 实时盈亏 · 成本价可从大喵票池锚定价带入</span>
+      </div>
+      <div class="page-actions">
+        <input class="input" placeholder="代码" style="width:140px"/>
+        <input class="input" placeholder="股数" type="number" style="width:90px"/>
+        <input class="input" placeholder="成本价" type="number" style="width:100px"/>
+        <button class="btn" title="从大喵票池带入该代码的锚定价">🎯 带入锚定价</button>
+        <input class="input" type="date" style="width:140px"/>
+        <button class="btn primary">+ 保存持仓</button>
+      </div>
+    </div>
+
+    <!-- 汇总条 -->
+    <div class="summary">
+      <div class="item"><div class="label">总市值</div><div class="val">¥ 186,420</div></div>
+      <div class="sep"></div>
+      <div class="item"><div class="label">总成本</div><div class="val">¥ 172,300</div></div>
+      <div class="sep"></div>
+      <div class="item"><div class="label">总盈亏</div><div class="val up">+¥ 14,120</div></div>
+      <div class="sep"></div>
+      <div class="item"><div class="label">总收益率</div><div class="val up">+8.20%</div></div>
+      <div class="sep"></div>
+      <div class="item"><div class="label">持仓只数</div><div class="val">4</div></div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th class="left">代码/名称</th>
+          <th>现价</th>
+          <th>今涨跌</th>
+          <th>成本价</th>
+          <th>持股数</th>
+          <th>市值</th>
+          <th>盈亏额</th>
+          <th>盈亏比例</th>
+          <th>仓位占比</th>
+          <th>建仓日期</th>
+          <th class="left" style="text-align:left; padding-left:14px;">备注</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="left sym"><span class="code">000977.SZ</span><span class="name">浪潮信息</span></td>
+          <td>38.42</td><td class="up">+3.21%</td>
+          <td>34.18</td><td>2000</td>
+          <td>76,840</td><td class="up">+8,480</td><td class="up">+12.40%</td>
+          <td>41.2%</td><td>2026-08-04</td>
+          <td class="strategy">低吸（来自大喵票池锚定价）</td>
+          <td><span class="row-action">编辑</span><span class="row-action">删除</span></td>
+        </tr>
+        <tr>
+          <td class="left sym"><span class="code">300058.SZ</span><span class="name">蓝色光标</span></td>
+          <td>9.82</td><td class="up">+4.13%</td>
+          <td>9.20</td><td>5000</td>
+          <td>49,100</td><td class="up">+3,100</td><td class="up">+6.74%</td>
+          <td>26.3%</td><td>2026-07-30</td>
+          <td class="strategy">做T底仓</td>
+          <td><span class="row-action">编辑</span><span class="row-action">删除</span></td>
+        </tr>
+        <tr>
+          <td class="left sym"><span class="code">603259.SH</span><span class="name">药明康德</span></td>
+          <td>55.30</td><td class="up">+10.01%</td>
+          <td>50.92</td><td>800</td>
+          <td>44,240</td><td class="up">+3,504</td><td class="up">+8.60%</td>
+          <td>23.7%</td><td>2026-08-03</td>
+          <td class="strategy">上板留</td>
+          <td><span class="row-action">编辑</span><span class="row-action">删除</span></td>
+        </tr>
+        <tr>
+          <td class="left sym"><span class="code">002262.SZ</span><span class="name">恩华药业</span></td>
+          <td>18.64</td><td class="down">-0.32%</td>
+          <td>18.90</td><td>900</td>
+          <td>16,776</td><td class="down">-234</td><td class="down">-1.38%</td>
+          <td>9.0%</td><td>2026-08-04</td>
+          <td class="strategy">五日线低吸试仓</td>
+          <td><span class="row-action">编辑</span><span class="row-action">删除</span></td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="note">* 盈亏/市值/仓位占比均为前端基于实时价实时计算；仓位占比为持仓内部相对占比（无现金字段）。成本价输入框旁的「🎯 带入锚定价」会从大喵票池读取该代码最近一条 anchor_price 自动填入。</div>
+  </div>
+</div>
+
+<script>
+  // 标签页切换
+  document.querySelectorAll('.tab').forEach(t => {
+    t.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+      t.classList.add('active');
+    });
+  });
+  // 分类筛选
+  document.querySelectorAll('.chip').forEach(c => {
+    c.addEventListener('click', () => {
+      const siblings = c.parentElement.querySelectorAll('.chip');
+      siblings.forEach(x => x.classList.remove('active'));
+      c.classList.add('active');
+    });
+  });
+  // 大喵/持仓页切换
+  const navD = document.querySelector('.nav-item.active');
+  const navP = document.getElementById('navPos');
+  const pD = document.getElementById('pageDamiao');
+  const pP = document.getElementById('pagePos');
+  navP.addEventListener('click', () => {
+    navD.classList.remove('active'); navP.classList.add('active');
+    pD.classList.add('hidden'); pP.classList.remove('hidden');
+  });
+  navD.addEventListener('click', () => {
+    navP.classList.remove('active'); navD.classList.add('active');
+    pP.classList.add('hidden'); pD.classList.remove('hidden');
+  });
+</script>
+</body>
+</html>

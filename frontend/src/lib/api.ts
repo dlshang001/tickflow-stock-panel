@@ -229,6 +229,35 @@ export interface WatchlistEntry {
   name?: string | null
 }
 
+// ===== 大喵观察票池 =====
+export type DamiaoCategory =
+  | 'new_watch' | 'new_open' | 'holding_todo' | 'old_deng' | 't_add'
+  | 'take_profit' | 'stop_loss' | 'closed'
+
+export interface DamiaoPoolEntry {
+  id: string
+  symbol: string
+  added_at: string
+  source_date: string
+  category: DamiaoCategory
+  strategy: string
+  anchor_price: number | null
+  exit_price: number | null
+  note: string
+  name?: string | null
+}
+
+// ===== 持仓 =====
+export interface PositionEntry {
+  symbol: string
+  shares: number
+  cost_price: number
+  opened_at: string | null
+  note: string
+  added_at: string
+  name?: string | null
+}
+
 export interface WatchlistImportCandidate {
   code: string
   symbol: string | null
@@ -1411,6 +1440,66 @@ export const api = {
         : '/api/watchlist/enriched',
     ),
 
+  // ===== 大喵观察票池 =====
+  damiaoPoolList: () => request<{ rows: DamiaoPoolEntry[] }>('/api/damiao-pool'),
+  damiaoPoolAdd: (body: {
+    symbol: string; source_date?: string; category?: string; strategy?: string; note?: string; anchor_price?: number | null
+  }) =>
+    request<{ rows: DamiaoPoolEntry[]; anchor_price: number | null }>('/api/damiao-pool', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  damiaoPoolUpdate: (id: string, body: Partial<{
+    source_date: string; category: string; strategy: string; anchor_price: number | null;
+    exit_price: number | null; note: string
+  }>) =>
+    request<{ rows: DamiaoPoolEntry[] }>(`/api/damiao-pool/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  damiaoPoolMarkExit: (id: string, category: string, exit_price: number | null) =>
+    request<{ rows: DamiaoPoolEntry[] }>(`/api/damiao-pool/${encodeURIComponent(id)}/exit`, {
+      method: 'POST',
+      body: JSON.stringify({ category, exit_price }),
+    }),
+  damiaoPoolRemove: (id: string) =>
+    request<{ rows: DamiaoPoolEntry[] }>(`/api/damiao-pool/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  damiaoPoolClear: () =>
+    request<{ removed: number }>('/api/damiao-pool', { method: 'DELETE' }),
+  damiaoPoolEnriched: (extColumns?: string) =>
+    request<{ rows: any[]; as_of: string | null; elapsed_ms: number }>(
+      extColumns
+        ? `/api/damiao-pool/enriched?ext_columns=${encodeURIComponent(extColumns)}`
+        : '/api/damiao-pool/enriched',
+    ),
+
+  // ===== 持仓 =====
+  positionsList: () => request<{ rows: PositionEntry[] }>('/api/positions'),
+  positionsUpsert: (body: {
+    symbol: string; shares: number; cost_price: number; opened_at?: string; note?: string
+  }) =>
+    request<{ rows: PositionEntry[] }>('/api/positions', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  positionsUpdate: (symbol: string, body: Partial<{
+    shares: number; cost_price: number; opened_at: string; note: string
+  }>) =>
+    request<{ rows: PositionEntry[] }>(`/api/positions/${encodeURIComponent(symbol)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  positionsRemove: (symbol: string) =>
+    request<{ rows: PositionEntry[] }>(`/api/positions/${encodeURIComponent(symbol)}`, { method: 'DELETE' }),
+  positionsClear: () =>
+    request<{ removed: number }>('/api/positions', { method: 'DELETE' }),
+  positionsEnriched: (extColumns?: string) =>
+    request<{ rows: any[]; as_of: string | null; elapsed_ms: number }>(
+      extColumns
+        ? `/api/positions/enriched?ext_columns=${encodeURIComponent(extColumns)}`
+        : '/api/positions/enriched',
+    ),
+
   screenerStrategies: async (assetType?: 'stock' | 'etf') => {
     const data = await request<{ strategies: StrategyDetail[]; load_errors?: StrategyLoadError[] }>(
       `/api/strategies?${assetType ? `asset_type=${assetType}&` : ''}timeframe=1d`,
@@ -1555,9 +1644,9 @@ export const api = {
       error?: string
     }>(
       '/api/settings/test_endpoint', {
-        method: 'POST',
-        body: JSON.stringify({ url, rounds }),
-      },
+      method: 'POST',
+      body: JSON.stringify({ url, rounds }),
+    },
     ),
 
   // 端点发现 —— 后端代理拉取 tickflow.org/endpoints.json(前端无法跨域直连)
@@ -1567,9 +1656,9 @@ export const api = {
   switchEndpoint: (url: string) =>
     request<{ ok: boolean; current_endpoint: string; error?: string }>(
       '/api/settings/switch_endpoint', {
-        method: 'POST',
-        body: JSON.stringify({ url }),
-      },
+      method: 'POST',
+      body: JSON.stringify({ url }),
+    },
     ),
 
   // ===== 扩展数据 =====
@@ -1782,7 +1871,7 @@ export const api = {
     const reader = res.body.getReader()
     const decoder = new TextDecoder()
     let buf = ''
-    for (;;) {
+    for (; ;) {
       const { done, value } = await reader.read()
       if (done) break
       buf += decoder.decode(value, { stream: true })
@@ -1854,7 +1943,7 @@ export const api = {
     const reader = res.body.getReader()
     const decoder = new TextDecoder()
     let buf = ''
-    for (;;) {
+    for (; ;) {
       const { done, value } = await reader.read()
       if (done) break
       buf += decoder.decode(value, { stream: true })
@@ -1916,7 +2005,7 @@ export const api = {
     const reader = res.body.getReader()
     const decoder = new TextDecoder()
     let buf = ''
-    for (;;) {
+    for (; ;) {
       const { done, value } = await reader.read()
       if (done) break
       buf += decoder.decode(value, { stream: true })
@@ -1958,7 +2047,7 @@ export const api = {
     const reader = res.body.getReader()
     const decoder = new TextDecoder()
     let buf = ''
-    for (;;) {
+    for (; ;) {
       const { done, value } = await reader.read()
       if (done) break
       buf += decoder.decode(value, { stream: true })
@@ -2141,7 +2230,7 @@ export const api = {
     const reader = res.body.getReader()
     const decoder = new TextDecoder()
     let buf = ''
-    for (;;) {
+    for (; ;) {
       const { done, value } = await reader.read()
       if (done) break
       buf += decoder.decode(value, { stream: true })

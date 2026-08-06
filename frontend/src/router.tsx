@@ -10,6 +10,8 @@ import { Logo } from './components/Logo'
 // framer-motion 等重库) → 大幅减小首屏 bundle。命名导出用 .then 映射为 default。
 // Layout / Onboarding / Auth 为应用外壳与入口, 保持同步加载。
 const Watchlist = lazy(() => import('./pages/Watchlist').then(m => ({ default: m.Watchlist })))
+const DamiaoPool = lazy(() => import('./pages/DamiaoPool').then(m => ({ default: m.DamiaoPool })))
+const Positions = lazy(() => import('./pages/Positions').then(m => ({ default: m.Positions })))
 const Screener = lazy(() => import('./pages/Screener').then(m => ({ default: m.Screener })))
 const Backtest = lazy(() => import('./pages/Backtest').then(m => ({ default: m.Backtest })))
 const Financials = lazy(() => import('./pages/Financials').then(m => ({ default: m.Financials })))
@@ -75,6 +77,8 @@ export const router = createBrowserRouter([
       { path: 'stock-analysis', element: <StockAnalysis /> },
       { path: 'review', element: <Review /> },
       { path: 'watchlist', element: <Watchlist /> },
+      { path: 'damiao-pool', element: <DamiaoPool /> },
+      { path: 'positions', element: <Positions /> },
       { path: 'screener', element: <Screener /> },
       { path: 'backtest', element: <Backtest /> },
       { path: 'financials', element: <Financials /> },

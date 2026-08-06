@@ -30,6 +30,12 @@ export const storage = {
   /** 自选列表列配置 */
   watchlistColumns:     kv<unknown[]>('watchlist_columns'),
 
+  /** 大喵票池列配置 */
+  damiaoColumns:        kv<unknown[]>('damiao_columns'),
+
+  /** 持仓列配置 */
+  positionsColumns:     kv<unknown[]>('positions_columns'),
+
   /** 个股日K信息条指标配置 */
   stockInfoBarFields:   kv<unknown[]>('stock_info_bar_fields'),
 
