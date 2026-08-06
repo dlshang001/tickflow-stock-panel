@@ -1,6 +1,6 @@
-import React, { useMemo, useState, useEffect } from 'react'
+import React, { useMemo, useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Trash2, Pencil, Check, Crosshair, Settings2 } from 'lucide-react'
+import { Plus, Trash2, Pencil, Check, Crosshair, Settings2, Sparkles, X, Copy, RefreshCw, History } from 'lucide-react'
 import { useLocation } from 'react-router-dom'
 import { api, type PositionEntry, type KlineRow, type MinuteKlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
@@ -11,6 +11,8 @@ import { MiniCandlestick } from '@/components/stock-table/MiniCandlestick'
 import { MiniIntraday } from '@/components/stock-table/MiniIntraday'
 import { resolveCandleConfig, resolveIntradayConfig } from '@/lib/list-columns'
 import { useCapabilities } from '@/lib/useSharedQueries'
+import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
+import { startAnalysis as startStockAnalysis } from '@/lib/stockAnalysisStore'
 import { ListColumnCustomizer } from '@/components/ListColumnCustomizer'
 import { StockSearchSelect } from '@/components/StockSearchSelect'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
@@ -172,6 +174,106 @@ export function Positions() {
     }
   }
 
+  // ===== AI 持仓复盘 =====
+  const [aiOpen, setAiOpen] = useState(false)
+  const [aiLoading, setAiLoading] = useState(false)
+  const [aiContent, setAiContent] = useState('')
+  const [aiError, setAiError] = useState('')
+  const [aiMeta, setAiMeta] = useState<any>(null)
+  const [aiFocus, setAiFocus] = useState('')
+  const aiAbortRef = useRef<boolean>(false)
+  // 历史报告
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [historyReports, setHistoryReports] = useState<any[]>([])
+  const [historyLoading, setHistoryLoading] = useState(false)
+
+  const loadHistory = async () => {
+    setHistoryLoading(true)
+    try {
+      const res = await api.positionReportsList()
+      setHistoryReports(res.reports ?? [])
+    } catch {
+      setHistoryReports([])
+    } finally {
+      setHistoryLoading(false)
+    }
+  }
+
+  const openHistory = () => {
+    setHistoryOpen(true)
+    loadHistory()
+  }
+
+  const openHistoryReport = (report: any) => {
+    setAiContent(report.content ?? '')
+    setAiMeta(report.summary ?? null)
+    setAiFocus(report.focus ?? '')
+    setAiError('')
+    setAiLoading(false)
+    setHistoryOpen(false)
+  }
+
+  const deleteHistoryReport = async (id: string) => {
+    setHistoryReports(prev => prev.filter(r => r.id !== id))
+    try { await api.positionReportDelete(id) } catch { /* 静默 */ }
+  }
+
+  const runAiReview = async (focus = '') => {
+    if (rows.length === 0) return
+    setAiOpen(true)
+    setHistoryOpen(false)
+    setAiLoading(true)
+    setAiContent('')
+    setAiError('')
+    setAiMeta(null)
+    aiAbortRef.current = false
+    try {
+      let first = true
+      for await (const chunk of api.positionAnalyzeStream(focus)) {
+        if (aiAbortRef.current) return
+        switch (chunk.type) {
+          case 'meta':
+            setAiMeta(chunk.summary ?? null)
+            break
+          case 'delta':
+            if (first) { setAiLoading(false); first = false }
+            setAiContent(c => c + (chunk.content ?? ''))
+            break
+          case 'error':
+            setAiLoading(false)
+            setAiError(chunk.message ?? '复盘失败')
+            return
+          case 'done':
+            setAiLoading(false)
+            break
+        }
+      }
+      if (first && !aiAbortRef.current) { setAiLoading(false); setAiError('未返回内容,请重试') }
+    } catch (e: any) {
+      setAiLoading(false)
+      setAiError(String(e?.message ?? '复盘失败'))
+    }
+  }
+
+  const closeAi = () => {
+    aiAbortRef.current = true
+    setAiOpen(false)
+  }
+
+  const analyzeOne = (r: any) => {
+    const price = priceOf(r)
+    const cost = Number(r.cost_price) || 0
+    const shares = Number(r.shares) || 0
+    const pnlPct = price != null && cost ? (price - cost) / cost * 100 : null
+    const pnlAmt = price != null ? (price - cost) * shares : null
+    const context = `我持有该标的,持股${shares}股,成本价${cost.toFixed(2)},` +
+      `现价${price != null ? price.toFixed(2) : '—'},` +
+      `浮动盈亏${pnlPct != null ? pnlPct.toFixed(2) + '%' : '—'}` +
+      `${pnlAmt != null ? '(' + (pnlAmt > 0 ? '+' : '') + pnlAmt.toFixed(0) + '元)' : ''},` +
+      `${r.opened_at ? '建仓日' + r.opened_at : ''}。请在分析时客观对照我的持仓成本。`
+    startStockAnalysis(r.symbol, r.name || '', context)
+  }
+
   const handleSubmit = () => {
     if (!form.symbol.trim() || form.shares === '' || form.cost_price === '') return
     if (editing) {
@@ -293,9 +395,19 @@ export function Positions() {
         title="持仓"
         subtitle="当前持仓清单 · 实时盈亏 · 成本价可从大喵票池锚定价带入"
         right={
-          <button onClick={() => setCustomizerOpen(true)} className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border border-border text-xs text-secondary hover:text-foreground transition-colors">
-            <Settings2 className="h-3.5 w-3.5" /> 列
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => runAiReview('')}
+              disabled={rows.length === 0}
+              className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white text-xs font-medium hover:opacity-90 disabled:opacity-40 transition-opacity"
+              title="AI 复盘当前全部持仓"
+            >
+              <Sparkles className="h-3.5 w-3.5" /> AI 复盘
+            </button>
+            <button onClick={() => setCustomizerOpen(true)} className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border border-border text-xs text-secondary hover:text-foreground transition-colors">
+              <Settings2 className="h-3.5 w-3.5" /> 列
+            </button>
+          </div>
         }
       />
 
@@ -370,6 +482,7 @@ export function Positions() {
                   {visibleColumns.map(col => <React.Fragment key={col.id}>{renderCell(r, col)}</React.Fragment>)}
                   <td className="px-3 py-2">
                     <div className="flex items-center justify-end gap-1 text-xs">
+                      <button className="p-1 text-muted hover:text-violet-400" title="AI 个股分析(带入持仓上下文)" onClick={() => analyzeOne(r)}><Sparkles className="h-3.5 w-3.5" /></button>
                       <button className="p-1 text-muted hover:text-accent" title="编辑" onClick={() => startEdit(r)}><Pencil className="h-3.5 w-3.5" /></button>
                       <button className="p-1 text-muted hover:text-danger" title="删除" onClick={() => { if (confirm(`删除 ${r.symbol} 的持仓？`)) removeMut.mutate(r.symbol) }}><Trash2 className="h-3.5 w-3.5" /></button>
                     </div>
@@ -396,6 +509,131 @@ export function Positions() {
         name={previewName}
         onClose={closePreview}
       />
+
+      {aiOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={closeAi} />
+          <div className="relative w-full max-w-2xl max-h-[85vh] flex flex-col rounded-card border border-border bg-base shadow-2xl">
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-border">
+              <div className="flex items-center gap-2">
+                <span className="inline-flex items-center justify-center h-7 w-7 rounded-lg bg-gradient-to-br from-violet-500 to-fuchsia-500 text-white">
+                  <Sparkles className="h-4 w-4" />
+                </span>
+                <div>
+                  <div className="text-sm font-medium text-foreground">AI 持仓复盘</div>
+                  {aiMeta && (
+                    <div className="text-[11px] text-muted">
+                      {aiMeta.count} 只持仓 · 总市值 {fmtBigNum(aiMeta.total_market_value)} · 浮盈亏 {aiMeta.total_pnl_pct != null ? (aiMeta.total_pnl_pct > 0 ? '+' : '') + aiMeta.total_pnl_pct + '%' : '—'}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <div className="flex items-center gap-1">
+                <button className="p-1.5 rounded-md text-muted hover:text-foreground hover:bg-elevated" title="历史报告" onClick={openHistory}>
+                  <History className="h-4 w-4" />
+                </button>
+                {!aiLoading && aiContent && (
+                  <>
+                    <button className="p-1.5 rounded-md text-muted hover:text-foreground hover:bg-elevated" title="重新生成" onClick={() => runAiReview(aiFocus)}>
+                      <RefreshCw className="h-4 w-4" />
+                    </button>
+                    <button className="p-1.5 rounded-md text-muted hover:text-foreground hover:bg-elevated" title="复制" onClick={() => navigator.clipboard?.writeText(aiContent)}>
+                      <Copy className="h-4 w-4" />
+                    </button>
+                  </>
+                )}
+                <button className="p-1.5 rounded-md text-muted hover:text-foreground hover:bg-elevated" onClick={closeAi}>
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+
+            <div className="relative flex-1 overflow-hidden">
+              {historyOpen ? (
+                <div className="absolute inset-0 overflow-y-auto px-5 py-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="text-sm font-medium text-foreground">历史复盘报告</div>
+                    <button className="text-xs text-muted hover:text-foreground" onClick={() => setHistoryOpen(false)}>返回当前</button>
+                  </div>
+                  {historyLoading ? (
+                    <div className="py-10 text-center text-xs text-muted">加载中…</div>
+                  ) : historyReports.length === 0 ? (
+                    <div className="py-10 text-center text-xs text-muted">还没有历史报告，复盘完成后会自动归档。</div>
+                  ) : (
+                    <div className="space-y-2">
+                      {historyReports.map((r: any) => {
+                        const s = r.summary || {}
+                        const pnlPct = s.total_pnl_pct
+                        return (
+                          <div key={r.id} className="group flex items-center gap-3 p-3 rounded-lg border border-border hover:bg-elevated/50 transition-colors cursor-pointer" onClick={() => openHistoryReport(r)}>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2 text-xs">
+                                <span className="text-foreground font-medium">{r.as_of || (r.created_at || '').slice(0, 10)}</span>
+                                <span className="text-muted">{r.count ?? s.count ?? 0} 只</span>
+                                {r.focus && <span className="text-accent truncate">· {r.focus}</span>}
+                              </div>
+                              <div className="mt-1 text-[11px] text-muted truncate">
+                                总市值 {fmtBigNum(s.total_market_value ?? 0)} · 浮盈亏 {pnlPct != null ? (pnlPct > 0 ? '+' : '') + pnlPct + '%' : '—'} · {new Date(r.created_at).toLocaleString()}
+                              </div>
+                            </div>
+                            <button
+                              className="opacity-0 group-hover:opacity-100 p-1 text-muted hover:text-danger transition-opacity"
+                              title="删除"
+                              onClick={(e) => { e.stopPropagation(); deleteHistoryReport(r.id) }}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="h-full overflow-y-auto px-5 py-4 text-sm text-secondary leading-relaxed">
+                  {aiError ? (
+                    <div className="flex flex-col items-center gap-3 py-10 text-center">
+                      <div className="text-sm text-danger">{aiError}</div>
+                      {aiError.includes('未配置') || aiError.includes('API Key') || aiError.includes('AI') ? (
+                        <a href="/settings?tab=ai" className="text-xs text-accent hover:underline">去设置 → AI 中配置</a>
+                      ) : (
+                        <button className={btnGhost} onClick={() => runAiReview(aiFocus)}>重试</button>
+                      )}
+                    </div>
+                  ) : aiLoading && !aiContent ? (
+                    <div className="flex items-center gap-2 text-muted py-10">
+                      <span className="h-2 w-2 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: '0ms' }} />
+                      <span className="h-2 w-2 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: '150ms' }} />
+                      <span className="h-2 w-2 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+                      <span className="ml-2">正在分析持仓与大盘环境…</span>
+                    </div>
+                  ) : (
+                    <>
+                      <MarkdownRenderer content={aiContent} />
+                      {aiLoading && <span className="inline-block w-1.5 h-4 ml-0.5 bg-violet-400 animate-pulse align-middle" />}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <form
+              className="flex items-center gap-2 px-5 py-3 border-t border-border"
+              onSubmit={(e) => { e.preventDefault(); runAiReview(aiFocus) }}
+            >
+              <input
+                className="flex-1 h-9 px-3 rounded-lg border border-border bg-elevated text-sm text-foreground outline-none focus:border-accent transition-colors"
+                placeholder="想重点看什么？如：医药仓位、风险点（可选）"
+                value={aiFocus}
+                onChange={e => setAiFocus(e.target.value)}
+              />
+              <button type="submit" className={btnPrimary} disabled={aiLoading}>
+                {aiLoading ? '分析中…' : '重新复盘'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

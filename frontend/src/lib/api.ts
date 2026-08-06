@@ -1499,6 +1499,9 @@ export const api = {
         ? `/api/positions/enriched?ext_columns=${encodeURIComponent(extColumns)}`
         : '/api/positions/enriched',
     ),
+  positionReportsList: () => request<{ reports: any[] }>('/api/positions/reports'),
+  positionReportDelete: (id: string) =>
+    request<{ ok: boolean }>(`/api/positions/reports/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   screenerStrategies: async (assetType?: 'stock' | 'etf') => {
     const data = await request<{ strategies: StrategyDetail[]; load_errors?: StrategyLoadError[] }>(
@@ -1992,6 +1995,49 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ as_of: asOf ?? null, focus: focus ?? '' }),
+    })
+    if (!res.ok) {
+      let detail = ''
+      try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
+      const msg = detail || `${res.status} ${res.statusText}`
+      toast(msg, 'error')
+      throw new Error(msg)
+    }
+    if (!res.body) throw new Error('响应无 body')
+
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    for (; ;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      const lines = buf.split('\n')
+      buf = lines.pop() ?? ''
+      for (const line of lines) {
+        const s = line.trim()
+        if (!s) continue
+        try { yield JSON.parse(s) } catch { /* ignore */ }
+      }
+    }
+    if (buf.trim()) {
+      try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
+    }
+  },
+
+  /** AI 持仓复盘 — 流式 NDJSON。 */
+  async *positionAnalyzeStream(focus?: string): AsyncGenerator<{
+    type: 'meta' | 'delta' | 'error' | 'done'
+    count?: number
+    summary?: any
+    as_of?: string
+    content?: string
+    message?: string
+  }> {
+    const res = await fetch('/api/positions/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ focus: focus ?? '' }),
     })
     if (!res.ok) {
       let detail = ''

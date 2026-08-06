@@ -1,11 +1,13 @@
 """持仓 API。"""
 from __future__ import annotations
 
+import json
 import logging
 import time
 
 import polars as pl
 from fastapi import APIRouter, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.api.watchlist import _WATCHLIST_COLS
@@ -31,6 +33,20 @@ class UpdateRequest(BaseModel):
     cost_price: float | None = None
     opened_at: str | None = None
     note: str | None = None
+
+
+class AnalyzeRequest(BaseModel):
+    """AI 持仓复盘请求。"""
+    focus: str = ""
+
+
+class SaveReportRequest(BaseModel):
+    """保存一条 AI 持仓复盘报告。"""
+    as_of: str
+    focus: str = ""
+    content: str
+    summary: dict | None = None
+    count: int = 0
 
 
 def _with_names(rows: list[dict], request: Request) -> list[dict]:
@@ -182,3 +198,88 @@ def positions_enriched(
     rows = q.to_dicts()
     elapsed = (time.perf_counter() - t0) * 1000
     return {"rows": rows, "as_of": str(as_of) if as_of else None, "elapsed_ms": elapsed}
+
+
+@router.post("/analyze")
+async def analyze_positions(request: Request, req: AnalyzeRequest):
+    """AI 持仓复盘 — NDJSON 流式返回。
+
+    装配当前全部持仓 + enriched 行情 + 每只近 K 线关键价位 → 组合复盘提示词 →
+    流式调用 LLM。流结束后自动归档一份报告(历史最多 30 条)。协议:
+      {"type":"meta","count","summary"}
+      {"type":"delta","content":"..."}
+      {"type":"error","message":"..."}
+      {"type":"done"}
+    """
+    from app.services.position_analyzer import analyze_positions_stream
+
+    repo = request.app.state.repo
+    quote_service = getattr(request.app.state, "quote_service", None)
+    pos_rows = positions.list_rows()
+
+    async def stream_gen():
+        from app.services import position_reports
+
+        meta: dict = {}
+        content_parts: list[str] = []
+        async for chunk in analyze_positions_stream(repo, quote_service, pos_rows, req.focus):
+            # 解析出 meta 与正文,用于流结束后归档
+            try:
+                evt = json.loads(chunk)
+                if evt.get("type") == "meta":
+                    meta = evt
+                elif evt.get("type") == "delta":
+                    content_parts.append(evt.get("content", ""))
+            except Exception:  # noqa: BLE001
+                pass
+            yield chunk + "\n"
+
+        # 自动归档(仅当有正文且正常结束)
+        content = "".join(content_parts).strip()
+        if content:
+            try:
+                summary = meta.get("summary") or {}
+                position_reports.save_report({
+                    "as_of": meta.get("as_of") or "",
+                    "focus": req.focus or "",
+                    "content": content,
+                    "summary": summary,
+                    "count": meta.get("count") or summary.get("count") or len(pos_rows),
+                })
+            except Exception as e:  # noqa: BLE001
+                logger.warning("auto-save position report failed: %s", e)
+
+    return StreamingResponse(
+        stream_gen(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/reports")
+def list_position_reports():
+    """获取全部历史持仓复盘报告(按时间降序,后端已裁剪到上限)。"""
+    from app.services import position_reports
+    return {"reports": position_reports.list_reports()}
+
+
+@router.post("/reports")
+def save_position_report(req: SaveReportRequest):
+    """手动保存一条持仓复盘报告(一般由流结束自动归档,此端点供重试/编辑场景)。"""
+    from app.services import position_reports
+    report = position_reports.save_report({
+        "as_of": req.as_of,
+        "focus": req.focus,
+        "content": req.content,
+        "summary": req.summary or {},
+        "count": req.count,
+    })
+    return {"ok": True, "report": report}
+
+
+@router.delete("/reports/{report_id}")
+def delete_position_report(report_id: str):
+    """删除一条持仓复盘报告。"""
+    from app.services import position_reports
+    ok = position_reports.delete_report(report_id)
+    return {"ok": ok}
