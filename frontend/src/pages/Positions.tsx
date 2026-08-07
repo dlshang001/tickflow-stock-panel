@@ -158,7 +158,7 @@ export function Positions() {
 
   // 汇总
   const summary = useMemo(() => {
-    let marketValue = 0, cost = 0, pnl = 0
+    let marketValue = 0, cost = 0, pnl = 0, dayPnl = 0
     for (const r of rows) {
       const price = priceOf(r)
       const shares = Number(r.shares) || 0
@@ -166,9 +166,25 @@ export function Positions() {
       if (price != null) marketValue += price * shares
       cost += costPrice * shares
       if (price != null) pnl += (price - costPrice) * shares
+      // 今日盈亏:优先用每股涨跌额;其次现价-昨收;最后用涨跌幅反推昨收
+      const chgAmt = Number(r.change_amount)
+      const prevClose = Number(r.prev_close)
+      if (shares > 0 && price != null) {
+        if (Number.isFinite(chgAmt) && chgAmt !== 0) {
+          dayPnl += chgAmt * shares
+        } else if (Number.isFinite(prevClose) && prevClose > 0) {
+          dayPnl += (price - prevClose) * shares
+        } else {
+          const pct = Number(r.change_pct)
+          if (Number.isFinite(pct) && pct !== 0 && pct > -1) {
+            const pc = price / (1 + pct)
+            dayPnl += (price - pc) * shares
+          }
+        }
+      }
     }
     const pnlPct = cost > 0 ? pnl / cost : null
-    return { marketValue, cost, pnl, pnlPct, count: rows.length }
+    return { marketValue, cost, pnl, pnlPct, dayPnl, count: rows.length }
   }, [rows])
 
   const totalMv = summary.marketValue
@@ -509,6 +525,12 @@ export function Positions() {
           label="总盈亏"
           value={`${summary.pnl >= 0 ? '+' : ''}${summary.pnl.toFixed(0)}`}
           valueClass={priceColorClass(summary.pnl)}
+        />
+        <div className="h-8 w-px bg-border" />
+        <SummaryItem
+          label="今日盈亏"
+          value={`${summary.dayPnl >= 0 ? '+' : ''}${summary.dayPnl.toFixed(0)}`}
+          valueClass={priceColorClass(summary.dayPnl)}
         />
         <div className="h-8 w-px bg-border" />
         <SummaryItem
