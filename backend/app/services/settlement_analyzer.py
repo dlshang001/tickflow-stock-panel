@@ -316,9 +316,13 @@ def _build_stats_for_settlement() -> dict:
         "records_count": records_count,
     }
 
+    return result
+
 
 async def analyze_settlement_stream(
     focus: str = "",
+    skill_id: str | None = None,
+    skill_params: dict | None = None,
 ) -> AsyncIterator[str]:
     """流式交割单分析 — yield 出 NDJSON 事件。
 
@@ -417,7 +421,44 @@ async def analyze_settlement_stream(
         "as_of": date.today().isoformat(),
     }, ensure_ascii=False)
 
-    user_prompt = _build_settlement_user_prompt(stats, reconcile_ctx, position_summary, focus)
+    # ============ Stage 4/5: 组装 prompt (Skill 委托 or 硬编码) ============
+    if skill_id:
+        from app.ai_skills import registry
+        logger.info("[stream] stage4/5 [skill] entry, skill_id=%s, skill_params=%s", skill_id, skill_params)
+        try:
+            skill = registry.get_skill(skill_id)
+            meta = skill.meta
+            logger.info(
+                "[stream] stage4/5 [skill] lookup ok, id=%s, name=%s, category=%s, params_count=%d",
+                meta.get("id"), meta.get("name"), meta.get("category"), len(meta.get("params", [])),
+            )
+            params = registry.validate_params(meta, skill_params)
+            logger.info("[stream] stage4/5 [skill] validate ok, raw=%s, validated=%s", skill_params, params)
+            context = {"stats": stats, "reconcile": reconcile_ctx, "position_summary": position_summary, "focus": focus}
+            logger.info(
+                "[stream] stage4/5 [skill] context assembled, keys=%s, by_symbol=%d, anomalies=%d, position=%s, focus_len=%d",
+                list(context.keys()),
+                len(stats.get("by_symbol", [])),
+                len(reconcile_ctx.get("anomalies", [])),
+                "yes" if position_summary else "no",
+                len(focus),
+            )
+            system_prompt, user_prompt = skill.run(params, context)
+            logger.info(
+                "[stream] stage4/5 [skill] run ok, sys_len=%d, usr_len=%d",
+                len(system_prompt), len(user_prompt),
+            )
+        except Exception as e:
+            logger.warning(
+                "[stream] stage4/5 [skill] failed, skill_id=%s, error_type=%s, error=%s, fallback to default",
+                skill_id, type(e).__name__, e, exc_info=True,
+            )
+            system_prompt, user_prompt = _SYSTEM_PROMPT, _build_settlement_user_prompt(stats, reconcile_ctx, position_summary, focus)
+    else:
+        logger.info("[stream] stage4/5 [skill] no skill_id provided, using default prompts")
+        system_prompt = _SYSTEM_PROMPT
+        user_prompt = _build_settlement_user_prompt(stats, reconcile_ctx, position_summary, focus)
+
     logger.info(
         "[stream] stage4/5 done, prompt_len=%d, symbols=%d, anomalies=%d, position=%s (elapsed=%.1fms)",
         len(user_prompt), len(stats.get("by_symbol", [])),
@@ -433,12 +474,12 @@ async def analyze_settlement_stream(
 
         logger.info(
             "[stream] stage5/5 llm start, system_prompt_len=%d, user_prompt_len=%d, temperature=0.5, max_tokens=4000",
-            len(_SYSTEM_PROMPT), len(user_prompt),
+            len(system_prompt), len(user_prompt),
         )
         chunk_count = 0
         async for delta in stream_ai_text(
             [
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.5,

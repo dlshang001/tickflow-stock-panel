@@ -264,6 +264,8 @@ async def recap_market_stream(
     as_of: date | None = None,
     focus: str = "",
     news: list[dict] | None = None,
+    skill_id: str | None = None,
+    skill_params: dict | None = None,
 ) -> AsyncIterator[str]:
     """流式大盘复盘:yield 出每个 NDJSON 事件。
 
@@ -296,14 +298,47 @@ async def recap_market_stream(
         "summary": _recap_summary(overview),
     }, ensure_ascii=False)
 
-    # 3+4. 构建 prompt + 流式调用 LLM(整体 try-except,任何异常 yield error,避免前端卡死)
+    # 3+4. 组装 prompt (Skill 委托 or 硬编码) + 流式调用 LLM
     try:
         from app.services.ai_provider import stream_ai_text
 
-        user_prompt = _build_user_prompt(overview, news or [], focus)
+        if skill_id:
+            from app.ai_skills import registry
+            logger.info("market_recap: [skill] entry, skill_id=%s, skill_params=%s", skill_id, skill_params)
+            try:
+                skill = registry.get_skill(skill_id)
+                meta = skill.meta
+                logger.info(
+                    "market_recap: [skill] lookup ok, id=%s, name=%s, category=%s, params_count=%d",
+                    meta.get("id"), meta.get("name"), meta.get("category"), len(meta.get("params", [])),
+                )
+                params = registry.validate_params(meta, skill_params)
+                logger.info("market_recap: [skill] validate ok, raw=%s, validated=%s", skill_params, params)
+                context = {"market_overview": overview, "news": news or [], "focus": focus}
+                logger.info(
+                    "market_recap: [skill] context assembled, keys=%s, news_count=%d, focus_len=%d",
+                    list(context.keys()), len(context["news"]), len(context["focus"]),
+                )
+                system_prompt, user_prompt = skill.run(params, context)
+                logger.info(
+                    "market_recap: [skill] run ok, sys_len=%d, usr_len=%d",
+                    len(system_prompt), len(user_prompt),
+                )
+            except Exception as e:
+                logger.warning(
+                    "market_recap: [skill] failed, skill_id=%s, error_type=%s, error=%s, fallback to default",
+                    skill_id, type(e).__name__, e, exc_info=True,
+                )
+                system_prompt = _SYSTEM_PROMPT
+                user_prompt = _build_user_prompt(overview, news or [], focus)
+        else:
+            logger.info("market_recap: [skill] no skill_id provided, using default prompts")
+            system_prompt = _SYSTEM_PROMPT
+            user_prompt = _build_user_prompt(overview, news or [], focus)
+
         async for delta in stream_ai_text(
             [
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.5,

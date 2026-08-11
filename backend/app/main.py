@@ -370,6 +370,10 @@ app.include_router(alerts.router)
 app.include_router(rps.router)
 app.include_router(settlement.router)
 
+# AI Skill 列表
+from app.api import ai_skills  # noqa: E402
+app.include_router(ai_skills.router)
+
 
 # 能力门控异常 → 403(而非默认 500)
 # 业务代码用 capset.require(Cap.X) 断言能力,缺失时抛 CapabilityDenied;

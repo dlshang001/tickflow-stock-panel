@@ -40,6 +40,8 @@ class UpdateRequest(BaseModel):
 class AnalyzeRequest(BaseModel):
     """AI 持仓复盘请求。"""
     focus: str = ""
+    skill_id: str | None = None
+    skill_params: dict | None = None
 
 
 class SaveReportRequest(BaseModel):
@@ -308,7 +310,11 @@ async def analyze_positions(request: Request, req: AnalyzeRequest):
 
         meta: dict = {}
         content_parts: list[str] = []
-        async for chunk in analyze_positions_stream(repo, quote_service, pos_rows, req.focus):
+        async for chunk in analyze_positions_stream(
+            repo, quote_service, pos_rows, req.focus,
+            skill_id=req.skill_id,
+            skill_params=req.skill_params,
+        ):
             # 解析出 meta 与正文,用于流结束后归档
             try:
                 evt = json.loads(chunk)

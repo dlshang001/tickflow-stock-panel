@@ -663,6 +663,30 @@ export interface StrategyParamDef {
   options?: string[]
 }
 
+// ===== AI Skill =====
+export interface SkillParamDef {
+  id: string
+  key?: string
+  label: string
+  type: 'bool' | 'select' | 'number' | 'int' | 'float' | 'text' | 'string'
+  default?: any
+  options?: string[]
+  min?: number
+  max?: number
+  step?: number
+}
+
+export interface SkillMeta {
+  id: string
+  name: string
+  category: 'market' | 'holdings' | 'settlement'
+  description: string
+  tags?: string[]
+  emoji?: string
+  default_for_category?: boolean
+  params: SkillParamDef[]
+}
+
 export interface CompositeChildInfo {
   id: string
   name: string
@@ -1875,6 +1899,11 @@ export const api = {
   positionReportDelete: (id: string) =>
     request<{ ok: boolean }>(`/api/positions/reports/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
+  // ===== 交割单分析报告 =====
+  settlementReportsList: () => request<{ reports: any[] }>('/api/settlement/reports'),
+  settlementReportDelete: (id: string) =>
+    request<{ ok: boolean }>(`/api/settlement/reports/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
   screenerStrategies: async (assetType?: 'stock' | 'etf') => {
     const data = await request<{ strategies: StrategyDetail[]; load_errors?: StrategyLoadError[] }>(
       `/api/strategies?${assetType ? `asset_type=${assetType}&` : ''}timeframe=1d`,
@@ -2356,6 +2385,11 @@ export const api = {
   },
 
   // ===== 大盘复盘 =====
+  aiSkillList: (category?: string): Promise<{ skills: SkillMeta[] }> =>
+    request<{ skills: SkillMeta[] }>(
+      category ? `/api/ai-skills/list?category=${encodeURIComponent(category)}` : '/api/ai-skills/list'
+    ),
+
   reviewReportsList: () =>
     request<{ reports: AiReviewReport[] }>('/api/market-recap/reports'),
 
@@ -2374,7 +2408,7 @@ export const api = {
    * AI 大盘复盘 — 流式调用(NDJSON,与个股/财务分析同协议)。
    * meta 里带 as_of / emotion_score / emotion_label / summary,供前端先渲染信号灯。
    */
-  async *reviewStream(asOf?: string, focus?: string): AsyncGenerator<{
+  async *reviewStream(asOf?: string, focus?: string, skillId?: string, skillParams?: Record<string, any>): AsyncGenerator<{
     type: 'meta' | 'delta' | 'error' | 'done'
     as_of?: string
     emotion_score?: number
@@ -2386,7 +2420,7 @@ export const api = {
     const res = await fetch('/api/market-recap/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ as_of: asOf ?? null, focus: focus ?? '' }),
+      body: JSON.stringify({ as_of: asOf ?? null, focus: focus ?? '', skill_id: skillId ?? null, skill_params: skillParams ?? null }),
     })
     if (!res.ok) {
       let detail = ''
@@ -2418,7 +2452,7 @@ export const api = {
   },
 
   /** AI 持仓复盘 — 流式 NDJSON。 */
-  async *positionAnalyzeStream(focus?: string): AsyncGenerator<{
+  async *positionAnalyzeStream(focus?: string, skillId?: string, skillParams?: Record<string, any>): AsyncGenerator<{
     type: 'meta' | 'delta' | 'error' | 'done'
     count?: number
     summary?: any
@@ -2429,7 +2463,7 @@ export const api = {
     const res = await fetch('/api/positions/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ focus: focus ?? '' }),
+      body: JSON.stringify({ focus: focus ?? '', skill_id: skillId ?? null, skill_params: skillParams ?? null }),
     })
     if (!res.ok) {
       let detail = ''
@@ -2460,8 +2494,8 @@ export const api = {
     }
   },
 
-  /** AI 交割单分析 — 威科夫交易行为分析 Skill，流式 NDJSON。 */
-  async *settlementAnalyzeStream(focus?: string): AsyncGenerator<{
+  /** AI 交割单分析 — 流式 NDJSON。 */
+  async *settlementAnalyzeStream(focus?: string, skillId?: string, skillParams?: Record<string, any>): AsyncGenerator<{
     type: 'meta' | 'delta' | 'error' | 'done'
     summary?: any
     as_of?: string
@@ -2471,7 +2505,7 @@ export const api = {
     const res = await fetch('/api/settlement/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ focus: focus ?? '' }),
+      body: JSON.stringify({ focus: focus ?? '', skill_id: skillId ?? null, skill_params: skillParams ?? null }),
     })
     if (!res.ok) {
       let detail = ''

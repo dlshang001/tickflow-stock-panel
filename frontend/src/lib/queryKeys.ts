@@ -94,6 +94,10 @@ export const QK = {
 
   // AI 大盘复盘
   reviewReports: ['review-reports'] as const,
+  // AI 持仓复盘
+  positionReports: ['position-reports'] as const,
+  // AI 交割单分析
+  settlementReports: ['settlement-reports'] as const,
 
   // 概念涨幅轮动矩阵
   rpsRotation:          (days: number) => ['rps-rotation', days] as const,

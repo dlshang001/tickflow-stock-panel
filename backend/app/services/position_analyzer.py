@@ -711,6 +711,8 @@ async def analyze_positions_stream(
     quote_service,
     positions_rows: list[dict],
     focus: str = "",
+    skill_id: str | None = None,
+    skill_params: dict | None = None,
 ) -> AsyncIterator[str]:
     """流式持仓复盘:yield 出每个 NDJSON 事件。
 
@@ -833,11 +835,46 @@ async def analyze_positions_stream(
         "as_of": date.today().isoformat(),
     }, ensure_ascii=False)
 
-    # 4. 流式 LLM
+    # 4. 组装 prompt (Skill 委托 or 硬编码) + 流式 LLM
     try:
         from app.services.ai_provider import stream_ai_text
 
-        user_prompt = _build_user_prompt(summary, holdings, market, concentration, sector_context, settlement_ctx, focus)
+        if skill_id:
+            from app.ai_skills import registry
+            logger.info("position_analyze: [skill] entry, skill_id=%s, skill_params=%s", skill_id, skill_params)
+            try:
+                skill = registry.get_skill(skill_id)
+                meta = skill.meta
+                logger.info(
+                    "position_analyze: [skill] lookup ok, id=%s, name=%s, category=%s, params_count=%d",
+                    meta.get("id"), meta.get("name"), meta.get("category"), len(meta.get("params", [])),
+                )
+                params = registry.validate_params(meta, skill_params)
+                logger.info("position_analyze: [skill] validate ok, raw=%s, validated=%s", skill_params, params)
+                context = {"summary": summary, "holdings": holdings, "market_snapshot": market, "concentration": concentration, "sector_context": sector_context, "settlement_ctx": settlement_ctx, "focus": focus}
+                logger.info(
+                    "position_analyze: [skill] context assembled, keys=%s, holdings=%d, concentration_industry=%d, focus_len=%d",
+                    list(context.keys()), len(holdings),
+                    len(concentration.get("industry", [])) if isinstance(concentration, dict) else 0,
+                    len(focus),
+                )
+                system_prompt, user_prompt = skill.run(params, context)
+                logger.info(
+                    "position_analyze: [skill] run ok, sys_len=%d, usr_len=%d",
+                    len(system_prompt), len(user_prompt),
+                )
+            except Exception as e:
+                logger.warning(
+                    "position_analyze: [skill] failed, skill_id=%s, error_type=%s, error=%s, fallback to default",
+                    skill_id, type(e).__name__, e, exc_info=True,
+                )
+                system_prompt = _SYSTEM_PROMPT
+                user_prompt = _build_user_prompt(summary, holdings, market, concentration, sector_context, settlement_ctx, focus)
+        else:
+            logger.info("position_analyze: [skill] no skill_id provided, using default prompts")
+            system_prompt = _SYSTEM_PROMPT
+            user_prompt = _build_user_prompt(summary, holdings, market, concentration, sector_context, settlement_ctx, focus)
+
         logger.info(
             "position_analyze: llm start, prompt_len=%d, holdings=%d, focus=%s",
             len(user_prompt), len(holdings), focus[:30] if focus else "(none)",
@@ -845,7 +882,7 @@ async def analyze_positions_stream(
         chunk_count = 0
         async for delta in stream_ai_text(
             [
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.5,

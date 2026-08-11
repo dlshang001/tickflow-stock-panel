@@ -1,4 +1,5 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Trash2, Sparkles, X, Copy, RefreshCw, History, CalendarClock, Plus, Settings2, TrendingDown, Eraser, Check } from 'lucide-react'
 import { api, type KlineRow, type MinuteKlineRow } from '@/lib/api'
@@ -33,6 +34,7 @@ function priceOf(r: any) { return r.close }
 
 export function Positions() {
   const qc = useQueryClient()
+  const navigate = useNavigate()
 
   const [columns, setColumns] = useState<ColumnConfig[]>(() => [...BUILTIN_COLUMNS])
   const columnsLoaded = useRef(false)
@@ -194,7 +196,7 @@ export function Positions() {
 
   // ===== AI 持仓复盘 =====
   type AiMode = 'holdings' | 'settlement' | 'reconcile'
-  const [aiMode, setAiMode] = useState<AiMode>('holdings')
+  const [aiMode] = useState<AiMode>('holdings')
   const [aiOpen, setAiOpen] = useState(false)
   const [aiStarted, setAiStarted] = useState(false) // 是否已发起过本轮复盘(区分"刚打开"与"分析中")
   const [aiLoading, setAiLoading] = useState(false)
@@ -348,22 +350,8 @@ export function Positions() {
     },
   }
 
-  // 仅打开弹窗(不自动复盘):让用户能先看历史,或手动点"开始复盘"
-  const openAi = (mode: AiMode = 'holdings') => {
-    setAiMode(mode)
-    setAiOpen(true)
-    setViewing(null)
-    setAiStarted(false)
-    setAiLoading(false)
-    setAiError('')
-    setAiContent('')
-    setAiMeta(null)
-    // 首次打开时用模式默认 focus,用户未修改过则自动填入
-    if (!aiFocus) {
-      setAiFocus(aiModeConfig[mode].defaultFocus)
-    }
-    loadHistory()
-  }
+  // AI 分析已迁移到 /review 页面,AI 按钮直接 navigate 跳转。
+  // 以下 AI 弹窗相关状态和逻辑保留为预留,aiOpen 永不为 true,弹窗不会渲染。
 
   // 主区域显示内容:查看历史优先于流式内容(不覆盖后台生成)
   const displayContent = viewing?.content ?? aiContent
@@ -476,7 +464,7 @@ export function Positions() {
               <Plus className="h-3.5 w-3.5" /> 买入
             </button>
             <button
-              onClick={() => openAi('holdings')}
+              onClick={() => navigate('/review?tab=holdings')}
               disabled={rows.length === 0}
               className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white text-xs font-medium hover:opacity-90 disabled:opacity-40 transition-opacity"
               title="AI 复盘当前全部持仓"
@@ -610,14 +598,14 @@ export function Positions() {
             <SettlementImport />
           </div>
           <div className="lg:col-span-2">
-            <SettlementRecords onAnalyze={() => openAi('settlement')} />
+            <SettlementRecords onAnalyze={() => navigate('/review?tab=settlement')} />
           </div>
         </div>
       )}
 
       {tab === 'reconcile' && (
         <div className="mt-4">
-          <ReconcilePanel onAnalyze={() => openAi('reconcile')} />
+          <ReconcilePanel onAnalyze={() => navigate('/review?tab=settlement')} />
         </div>
       )}
 

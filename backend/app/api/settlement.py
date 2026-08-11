@@ -145,6 +145,8 @@ def fix_reconcile(req: ReconFixRequest):
 
 class AnalyzeRequest(BaseModel):
     focus: str = ""
+    skill_id: str | None = None
+    skill_params: dict | None = None
 
 
 @router.post("/analyze")
@@ -163,11 +165,15 @@ async def analyze_settlement(request: Request, req: AnalyzeRequest):
     from app.services.settlement_analyzer import analyze_settlement_stream
 
     async def stream_gen():
-        from app.services import position_reports
+        from app.services import settlement_reports
 
         meta: dict = {}
         content_parts: list[str] = []
-        async for chunk in analyze_settlement_stream(req.focus):
+        async for chunk in analyze_settlement_stream(
+            req.focus,
+            skill_id=req.skill_id,
+            skill_params=req.skill_params,
+        ):
             try:
                 evt = json.loads(chunk)
                 if evt.get("type") == "meta":
@@ -181,13 +187,12 @@ async def analyze_settlement(request: Request, req: AnalyzeRequest):
         content = "".join(content_parts).strip()
         if content:
             try:
-                position_reports.save_report({
+                settlement_reports.save_report({
                     "as_of": meta.get("as_of") or "",
                     "focus": req.focus or "",
                     "content": content,
                     "summary": meta.get("summary") or {},
                     "count": meta.get("summary", {}).get("records_count", 0),
-                    "report_type": "settlement",
                 })
             except Exception as e:  # noqa: BLE001
                 logger.warning("auto-save settlement report failed: %s", e)
@@ -197,3 +202,18 @@ async def analyze_settlement(request: Request, req: AnalyzeRequest):
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.get("/reports")
+def list_settlement_reports():
+    """获取全部历史交割单分析报告(按时间降序,后端已裁剪到上限)。"""
+    from app.services import settlement_reports
+    return {"reports": settlement_reports.list_reports()}
+
+
+@router.delete("/reports/{report_id}")
+def delete_settlement_report(report_id: str):
+    """删除一条交割单分析报告。"""
+    from app.services import settlement_reports
+    ok = settlement_reports.delete_report(report_id)
+    return {"ok": ok}

@@ -28,6 +28,8 @@ class AnalyzeRequest(BaseModel):
     """AI 大盘复盘请求。"""
     as_of: str | None = None  # 可选:复盘日期(YYYY-MM-DD),缺省取最新有数据日
     focus: str = ""           # 可选:用户追加的复盘关注点
+    skill_id: str | None = None
+    skill_params: dict | None = None
 
 
 @router.post("/analyze")
@@ -57,7 +59,11 @@ async def analyze_market(request: Request, req: AnalyzeRequest):
             raise HTTPException(400, f"as_of 格式应为 YYYY-MM-DD,收到: {req.as_of}")
 
     async def stream_gen():
-        async for chunk in recap_market_stream(repo, quote_service, depth_service, as_of, req.focus):
+        async for chunk in recap_market_stream(
+            repo, quote_service, depth_service, as_of, req.focus,
+            skill_id=req.skill_id,
+            skill_params=req.skill_params,
+        ):
             yield chunk + "\n"
 
     return StreamingResponse(
