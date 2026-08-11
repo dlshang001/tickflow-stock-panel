@@ -1,49 +1,82 @@
-"""持仓服务(当前持仓清单)。
+"""持仓服务（当前持仓清单）—— FIFO 适配层。
 
-存储:`data/user_data/positions.parquet`。
-一个 symbol 一行,重复录入执行 upsert(覆盖)。
-字段:symbol/shares/cost_price/opened_at/note/added_at。
+阶段 0 起，持仓不再直接存储，而是由 position_log 中的操作日志按 FIFO 派生
+（见 position_log.compute_positions）。本模块保留原有函数签名，供现有
+API 层（app/api/positions.py）与持仓分析器无感切换：
+
+  - list_rows()  返回字段对齐旧 PositionEntry：
+      symbol/shares/cost_price/opened_at/note/added_at
+  - upsert/update/remove/clear 映射为日志写入，过渡期保持旧前端可用：
+      upsert(symbol, shares, cost_price, ...)
+        · 当前无该 symbol 持仓 → 写一条 buy（建仓/加仓叠加 FIFO）
+        · 当前已有持仓 → 先 clear 再 buy（语义等同旧版"覆盖为新数量/成本"）
+      update(symbol, **fields)      → clear + 按更新后字段 buy 重建
+      remove(symbol)                → 写一条 clear
+      clear()                       → 清空全部日志
+
+注意：旧的 data/user_data/positions.parquet 已由 position_log.migrate_legacy_positions()
+在启动时迁移为 source='migration' 的日志，并备份为 positions.parquet.bak。
+本模块不再读写该文件。
 """
 from __future__ import annotations
 
 import logging
 from datetime import datetime
-from pathlib import Path
 
-import polars as pl
-
-from app.config import settings
+from app.services import position_log as plog
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA = {
-    "symbol": pl.Utf8,
-    "shares": pl.Float64,
-    "cost_price": pl.Float64,
-    "opened_at": pl.Utf8,
-    "note": pl.Utf8,
-    "added_at": pl.Utf8,
-}
+# 对外暴露的字段顺序（与旧 PositionEntry 一致）
+_FIELDS = ["symbol", "shares", "cost_price", "opened_at", "note", "added_at"]
 
 
-def _path() -> Path:
-    p = settings.data_dir / "user_data" / "positions.parquet"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return p
-
-
-def _empty() -> pl.DataFrame:
-    return pl.DataFrame(schema=_SCHEMA)
+def _position_to_row(p: plog.ComputedPosition) -> dict:
+    return {
+        "symbol": p.symbol,
+        "shares": p.shares,
+        "cost_price": p.cost_price,
+        "opened_at": p.opened_at or "",
+        "note": p.note,
+        "added_at": p.added_at,
+        "name": p.name,
+    }
 
 
 def list_rows() -> list[dict]:
-    p = _path()
-    if not p.exists():
-        return []
-    df = pl.read_parquet(p)
-    if df.is_empty():
-        return []
-    return df.to_dicts()
+    """返回当前持仓（FIFO 派生），字段对齐旧结构。"""
+    positions = plog.compute_positions()
+    return [_position_to_row(p) for p in positions]
+
+
+def _rebuild(symbol: str, shares: float, cost_price: float, opened_at: str, note: str) -> None:
+    """用 clear + buy 把某标的重建为指定持仓（覆盖语义）。"""
+    existing = plog.get_position(symbol)
+    if existing is not None:
+        plog.insert_log({
+            "op_type": "clear",
+            "symbol": symbol,
+            "price": existing.cost_price,
+            "volume": existing.shares,
+            "op_date": opened_at or _today(),
+            "note": "编辑重建",
+            "source": "manual",
+        })
+    if shares and shares > 0:
+        plog.insert_log({
+            "op_type": "buy",
+            "symbol": symbol,
+            "price": float(cost_price),
+            "volume": float(shares),
+            "amount": round(float(cost_price) * float(shares) + 1e-9, 2),
+            "op_date": opened_at or _today(),
+            "note": note or "",
+            "source": "manual",
+        })
+
+
+def _today() -> str:
+    return datetime.now().date().isoformat()
 
 
 def upsert(
@@ -53,61 +86,47 @@ def upsert(
     opened_at: str | None = None,
     note: str = "",
 ) -> list[dict]:
-    p = _path()
-    if p.exists():
-        df = pl.read_parquet(p)
-        if not df.is_empty() and symbol in df["symbol"].to_list():
-            df = df.filter(pl.col("symbol") != symbol)
-    else:
-        df = _empty()
-
-    now = datetime.utcnow().isoformat(timespec="seconds")
-    new_row = pl.DataFrame({
-        "symbol": [symbol],
-        "shares": [float(shares)],
-        "cost_price": [float(cost_price)],
-        "opened_at": [opened_at or ""],
-        "note": [note or ""],
-        "added_at": [now],
-    }, schema=_SCHEMA)
-    out = pl.concat([df, new_row], how="diagonal_relaxed")
-    out.write_parquet(p)
-    return out.to_dicts()
+    """新增/覆盖一条持仓（旧版直接覆盖语义，过渡期保留）。"""
+    _rebuild(symbol, float(shares), float(cost_price), opened_at or "", note or "")
+    return list_rows()
 
 
 def update(symbol: str, **fields) -> list[dict]:
-    p = _path()
-    if not p.exists():
-        return []
-    df = pl.read_parquet(p)
-    if df.is_empty() or symbol not in df["symbol"].to_list():
-        return df.to_dicts()
-    exprs = []
-    for k, v in fields.items():
-        if k in _SCHEMA and k != "symbol" and v is not None:
-            exprs.append(pl.when(pl.col("symbol") == symbol).then(pl.lit(v)).otherwise(pl.col(k)).alias(k))
-    if exprs:
-        df = df.with_columns(exprs)
-    df.write_parquet(p)
-    return df.to_dicts()
+    """更新持仓字段。仅 shares/cost_price/opened_at/note 有意义。
+
+    采用 clear + buy 重建，使新的股数/成本成为当前持仓（覆盖语义）。
+    未提供的字段沿用当前持仓值。
+    """
+    current = plog.get_position(symbol)
+    if current is None:
+        return list_rows()
+
+    shares = float(fields.get("shares", current.shares))
+    cost_price = float(fields.get("cost_price", current.cost_price))
+    opened_at = fields.get("opened_at")
+    opened_at = opened_at if opened_at is not None else (current.opened_at or "")
+    note = fields.get("note")
+    note = note if note is not None else current.note
+    _rebuild(symbol, shares, cost_price, opened_at, note)
+    return list_rows()
 
 
 def remove(symbol: str) -> list[dict]:
-    p = _path()
-    if not p.exists():
-        return []
-    df = pl.read_parquet(p)
-    df = df.filter(pl.col("symbol") != symbol)
-    df.write_parquet(p)
-    return df.to_dicts()
+    """删除一条持仓 → 写一条 clear 日志。"""
+    current = plog.get_position(symbol)
+    if current is not None:
+        plog.insert_log({
+            "op_type": "clear",
+            "symbol": symbol,
+            "price": current.cost_price,
+            "volume": current.shares,
+            "op_date": _today(),
+            "note": "删除持仓",
+            "source": "manual",
+        })
+    return list_rows()
 
 
 def clear() -> int:
-    p = _path()
-    if not p.exists():
-        return 0
-    df = pl.read_parquet(p)
-    count = df.height
-    if count > 0:
-        _empty().write_parquet(p)
-    return count
+    """清空全部持仓日志。返回删除条数。"""
+    return plog.clear_all_logs()

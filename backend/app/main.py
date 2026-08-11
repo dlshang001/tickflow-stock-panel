@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import analysis, auth as auth_api, backtest, damiao_pool, data, ext_data, financials, indices, intraday, kline, market_recap, monitor_rules, alerts, overview, pipeline, positions, regime, rps, screener, settings as settings_api, signals, stock_analysis, strategy, watchlist
+from app.api import analysis, auth as auth_api, backtest, damiao_pool, data, ext_data, financials, indices, intraday, kline, market_recap, monitor_rules, alerts, overview, pipeline, positions, regime, rps, screener, settlement, settings as settings_api, signals, stock_analysis, strategy, watchlist
 from app.api.routes import router as core_router
 from app.config import settings
 from app.jobs import daily_pipeline
@@ -58,6 +58,16 @@ async def lifespan(app: FastAPI):
     # Polars 缓存预热 — enriched 的重计算 (107万行 compute_indicators) 推后台,
     # instruments/index/ETF 仍同步 (毫秒级)。应用立即 ready, 指标算完后自动替换。
     repo.refresh_cache(background=True)
+
+    # 持仓事件溯源迁移：旧 positions.parquet → position_log (source=migration)。
+    # 幂等（已有 migration 日志则跳过），失败只告警不阻断启动。
+    try:
+        from app.services import position_log
+        migrated = position_log.migrate_legacy_positions()
+        if migrated:
+            logger.info("legacy positions migrated to position_log: %d rows", migrated)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("position_log migration failed: %s", e)
 
     # 能力探测
     capset = detect_capabilities()
@@ -358,6 +368,7 @@ app.include_router(signals.router)
 app.include_router(monitor_rules.router)
 app.include_router(alerts.router)
 app.include_router(rps.router)
+app.include_router(settlement.router)
 
 
 # 能力门控异常 → 403(而非默认 500)

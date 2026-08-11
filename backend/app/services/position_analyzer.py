@@ -131,7 +131,10 @@ def _summarize_holding(repo, pos: dict, enriched_map: dict) -> dict | None:
                 nearest_support = max(supports) if supports else None
                 nearest_resistance = min(resistances) if resistances else None
     except Exception as e:  # noqa: BLE001
-        logger.debug("position analyze kline/levels failed for %s: %s", symbol, e)
+        logger.warning(
+            "summarize_holding: kline/levels failed for %s (name=%s, last=%.2f): %s",
+            symbol, enr.get("name", "?"), last or 0, e,
+        )
 
     return {
         "symbol": symbol,
@@ -175,7 +178,16 @@ def _build_market_snapshot(repo, quote_service) -> dict:
 
         ov = build_market_overview(repo, quote_service=quote_service)
         if not ov or not ov.get("as_of"):
+            logger.info("market_snapshot: no as_of, return empty")
             return empty
+
+        logger.info(
+            "market_snapshot: as_of=%s, emotion=%s, breadth_up=%.1f%%, indices=%d",
+            ov.get("as_of"),
+            (ov.get("emotion") or {}).get("label", "?"),
+            (ov.get("breadth") or {}).get("up_pct", 0),
+            len(ov.get("indices") or []),
+        )
 
         def _rank_items(bucket: list[dict], limit: int = 6) -> list[dict]:
             out = []
@@ -297,10 +309,12 @@ def _load_ext_dimension(data_dir, config_id: str, field: str) -> dict[str, list[
 
     path = data_dir / "ext_data" / config_id / "part.parquet"
     if not path.exists():
+        logger.debug("load_dim %s: path not found %s", config_id, path)
         return {}
     try:
         df = pl.read_parquet(path)
         if df.is_empty() or field not in df.columns:
+            logger.debug("load_dim %s: empty df or missing field %s", config_id, field)
             return {}
         mapping: dict[str, list[str]] = {}
         for rec in df.select(["symbol", field]).to_dicts():
@@ -313,6 +327,7 @@ def _load_ext_dimension(data_dir, config_id: str, field: str) -> dict[str, list[
                 # 行业分级 "银行-银行-股份制银行" → 取一级行业
                 values = [v.split("-")[0].strip() for v in values if v.strip()]
             mapping[str(sym)] = [v for v in values if v]
+        logger.debug("load_dim %s: loaded %d symbols from parquet", config_id, len(mapping))
         return mapping
     except Exception as e:  # noqa: BLE001
         logger.debug("load ext dimension %s failed: %s", config_id, e)
@@ -327,10 +342,15 @@ def _build_concentration(data_dir, holdings: list[dict]) -> dict:
     """
     total_mv = sum(h.get("market_value") or 0 for h in holdings)
     if total_mv <= 0:
+        logger.info("concentration: total_mv <= 0, skip")
         return {"industry": [], "concept": [], "uncovered": []}
 
     industry_map = _load_ext_dimension(data_dir, "ext_hy_ths", "所属同花顺行业")
     concept_map = _load_ext_dimension(data_dir, "ext_gn_ths", "所属概念")
+    logger.info(
+        "concentration: dims loaded, industry_symbols=%d, concept_symbols=%d",
+        len(industry_map), len(concept_map),
+    )
     uncovered: list[str] = []
 
     def _aggregate(dim_map: dict[str, list[str]], multi: bool) -> list[dict]:
@@ -389,9 +409,11 @@ def _build_sector_context(repo, data_dir, holdings: list[dict]) -> dict:
         svc = ScreenerService(repo)
         as_of = svc.latest_date()
         if not as_of:
+            logger.info("sector_context: no latest date, skip")
             return {"industries": [], "concepts": []}
         df = svc._load_enriched_for_date(as_of)
         if df is None or df.is_empty():
+            logger.info("sector_context: no enriched data for %s, skip", as_of)
             return {"industries": [], "concepts": []}
         # 只取聚合需要的列,构造 quote_map(symbol -> change_pct/name)
         cols = [c for c in ("symbol", "name", "change_pct", "amount") if c in df.columns]
@@ -464,6 +486,95 @@ def _build_sector_context(repo, data_dir, holdings: list[dict]) -> dict:
     }
 
 
+def _build_settlement_context() -> dict:
+    """获取交割单统计与对账异常，用于 AI 复盘注入。
+
+    返回:
+      {
+        "available": bool,
+        "summary": {...},             # 汇总（笔数/金额/费用）
+        "realized_pnl": float,        # 已实现盈亏总额
+        "monthly": [...],             # 月度盈亏 Top 6
+        "by_symbol_top": [...],       # 单票盈亏 Top 5
+        "by_symbol_bottom": [...],    # 单票亏损 Bottom 5
+        "fees": {...},                # 费用明细
+        "reconcile_anomalies": [...],  # 对账异常标的清单
+        "records_count": int,
+      }
+    数据缺失不阻断复盘，返回 available=False。
+    """
+    empty = {"available": False}
+    try:
+        from app.services import settlement, reconcile as reconcile_svc
+
+        stats = settlement.compute_stats()
+        records_count = stats.get("records_count", 0)
+        logger.info(
+            "settlement_ctx: stats fetched, records=%d, pnl_curve_points=%d, monthly=%d, by_symbol=%d",
+            records_count,
+            len(stats.get("realized_pnl_curve", [])),
+            len(stats.get("monthly", [])),
+            len(stats.get("by_symbol", [])),
+        )
+        if records_count == 0:
+            logger.info("settlement_ctx: no records, skip")
+            return empty
+
+        # 单票盈亏 Top/Bottom 5
+        by_symbol = stats.get("by_symbol", [])
+        by_symbol_top = [s for s in by_symbol if s.get("pnl", 0) > 0][:5]
+        by_symbol_bottom = [s for s in by_symbol if s.get("pnl", 0) < 0][:5]
+        by_symbol_bottom.sort(key=lambda s: s.get("pnl", 0))  # 亏损从大到小
+
+        # 月度盈亏 Top 6
+        monthly = stats.get("monthly", [])[-6:]
+
+        # 对账异常
+        recon_anomalies: list[dict] = []
+        try:
+            items = reconcile_svc.reconcile()
+            for item in items:
+                if item.get("diff_type") != "matched":
+                    recon_anomalies.append({
+                        "symbol": item.get("symbol"),
+                        "name": item.get("name"),
+                        "diff_type": item.get("diff_type"),
+                        "shares_delta": item.get("shares_delta"),
+                        "cost_delta": item.get("cost_delta"),
+                    })
+        except Exception as e:  # noqa: BLE001
+            logger.warning("settlement_ctx: reconcile failed: %s", e)
+
+        # 累积盈亏总额
+        pnl_curve = stats.get("realized_pnl_curve", [])
+        total_realized = pnl_curve[-1]["cumulative"] if pnl_curve else 0.0
+
+        result = {
+            "available": True,
+            "summary": stats.get("summary", {}),
+            "realized_pnl": round(total_realized, 2),
+            "monthly": monthly,
+            "by_symbol_top": by_symbol_top,
+            "by_symbol_bottom": by_symbol_bottom,
+            "fees": stats.get("fees", {}),
+            "reconcile_anomalies": recon_anomalies,
+            "records_count": stats.get("records_count", 0),
+        }
+        logger.info(
+            "settlement_ctx: built, realized_pnl=%.2f, top=%d, bottom=%d, monthly=%d, anomalies=%d, fees=%.2f",
+            result["realized_pnl"],
+            len(result["by_symbol_top"]),
+            len(result["by_symbol_bottom"]),
+            len(result["monthly"]),
+            len(result["reconcile_anomalies"]),
+            result["fees"].get("total", 0),
+        )
+        return result
+    except Exception as e:  # noqa: BLE001
+        logger.debug("build settlement context failed: %s", e)
+        return empty
+
+
 # ================================================================
 # 系统提示词 —— 账户组合客观复盘框架
 # 红线:只做客观状态陈述,不输出任何买卖/仓位/止损止盈建议。
@@ -498,7 +609,16 @@ _SYSTEM_PROMPT = """你是一位拥有 15 年 A 股研究经验的组合复盘�
 - 表格之后,对浮盈亏较大或技术状态值得注意的标的用 2-4 句客观补充
 - 每条只陈述事实,不写操作建议
 
-### 4. 🧩 行业/概念集中度与板块强弱
+### 4. 💰 交割单盈亏回顾
+基于提供的"交割单数据"（含真实成交记录的已实现盈亏、费用、月度表现），客观描述：
+- 历史已实现盈亏总额（盈利/亏损）
+- 费用合计（佣金/印花税/过户费）及占成交额比例
+- 盈利最多的前几只标的与亏损最多的标的（金额/名称）
+- 最近几个月的月度盈亏趋势（是持续盈利还是波动较大）
+- 若存在"对账异常"（交割单推导持仓与操作日志不符的标的），列出并客观说明差异类型与股数/成本偏差
+若交割单数据为空（未导入），直接说明"暂无交割单数据，无法回顾已实现盈亏"。
+
+### 5. 🧩 行业/概念集中度与板块强弱
 基于提供的"板块归因"和"持仓板块全市场强弱对照"数据,客观描述:
 - 持仓主要集中在哪些行业(列出占比靠前的行业及其占比)
 - 概念暴露(若有,列出占比较高的概念)
@@ -509,15 +629,16 @@ _SYSTEM_PROMPT = """你是一位拥有 15 年 A 股研究经验的组合复盘�
 本节是第 5 节"风险点"中结构维度的数据支撑;**不下"应该分散/换仓/追涨"等操作结论**。
 若板块归因或强弱数据为空,直接说明"行业/概念数据未同步,暂无法评估",不要编造排名。
 
-### 5. ⚠️ 风险点
+### 6. ⚠️ 风险点
 客观列出(不超过 5 条):
 - 盈亏分布是否分化(单只贡献过大/拖后腿)
-- 行业/概念是否过度集中(引用第 4 节数据)
+- 行业/概念是否过度集中(引用第 5 节数据)
 - 哪些标的跌破关键均线或距支撑位较近
 - 哪些标的 RSI 超买/超卖或量能异常
+- 若有对账异常(第 4 节交割单数据)且同时存在持仓浮亏,客观提示"该标的操作日志与交割单记录存在差异,建议核实"
 只做客观提示,不下"应该减仓"等结论。
 
-### 6. 🔍 值得关注的客观信号
+### 7. 🔍 值得关注的客观信号
 列出后续可观察的客观量价信号(如某均线得失、某压力位能否放量突破、量能变化),**不附任何操作结论**。
 
 ## 准则
@@ -533,7 +654,7 @@ _SYSTEM_PROMPT = """你是一位拥有 15 年 A 股研究经验的组合复盘�
 现在请基于下方数据进行复盘。"""
 
 
-def _build_user_prompt(summary: dict, holdings: list[dict], market: dict, concentration: dict, sector_context: dict, focus: str) -> str:
+def _build_user_prompt(summary: dict, holdings: list[dict], market: dict, concentration: dict, sector_context: dict, settlement_ctx: dict, focus: str) -> str:
     parts: list[str] = [
         f"复盘日期: {date.today().isoformat()}",
         "",
@@ -562,6 +683,11 @@ def _build_user_prompt(summary: dict, holdings: list[dict], market: dict, concen
         "据此可客观判断:持仓是押在当日强势板块还是弱势板块。",
         "```json",
         json.dumps(sector_context, ensure_ascii=False),
+        "```",
+        "",
+        "## 交割单数据(真实成交记录的已实现盈亏/费用/月度表现/对账异常)",
+        "```json",
+        json.dumps(settlement_ctx, ensure_ascii=False),
         "```",
         "",
         "## 大盘环境(看板页数据:指数/情绪雷达/涨跌分布/连板梯队/活跃度/领涨领跌板块)",
@@ -598,6 +724,11 @@ async def analyze_positions_stream(
         yield json.dumps({"type": "error", "message": "当前没有持仓,无法复盘"}, ensure_ascii=False)
         return
 
+    logger.info(
+        "position_analyze: start, positions=%d, focus=%s",
+        len(positions_rows), focus[:60] if focus else "(none)",
+    )
+
     # 1. 取 enriched 最新行情(股票 + ETF),构建 symbol -> quote 映射
     enriched_map: dict[str, dict] = {}
     try:
@@ -614,6 +745,12 @@ async def analyze_positions_stream(
         for sym, nm in name_map.items():
             enriched_map.setdefault(sym, {})["name"] = nm
         _ = etf_set  # 资产分流已由 get_enriched_latest_asset 覆盖
+        logger.info(
+            "position_analyze: enriched loaded, symbols=%d, stocks=%d, etf=%d",
+            len(enriched_map),
+            df_e.height if df_e is not None else 0,
+            df_etf.height if df_etf is not None else 0,
+        )
     except Exception as e:  # noqa: BLE001
         logger.exception("load enriched for position analyze failed: %s", e)
         yield json.dumps({"type": "error", "message": f"加载行情数据失败: {e}"}, ensure_ascii=False)
@@ -629,20 +766,64 @@ async def analyze_positions_stream(
         yield json.dumps({"type": "error", "message": "持仓数据无法解析"}, ensure_ascii=False)
         return
 
+    logger.info(
+        "position_analyze: holdings assembled, valid=%d/%d, skipped=%d",
+        len(holdings), len(positions_rows), len(positions_rows) - len(holdings),
+    )
+
     summary = _build_portfolio_summary(holdings)
+    logger.info(
+        "position_analyze: summary, total_mv=%.2f, total_pnl=%.2f, pnl_pct=%.1f%%, winners=%d/%d, day_up=%d/%d",
+        summary.get("total_market_value", 0),
+        summary.get("total_pnl", 0),
+        summary.get("total_pnl_pct") or 0,
+        summary.get("winners", 0),
+        summary.get("count", 0),
+        summary.get("day_up", 0),
+        summary.get("count", 0),
+    )
+
     market = _build_market_snapshot(repo, quote_service)
+    logger.info(
+        "position_analyze: market snapshot, as_of=%s, emotion=%s",
+        market.get("as_of"), (market.get("emotion") or {}).get("label") if market.get("emotion") else "(none)",
+    )
     try:
         concentration = _build_concentration(repo.store.data_dir, holdings)
     except Exception as e:  # noqa: BLE001
         logger.debug("build concentration failed: %s", e)
         concentration = {"industry": [], "concept": [], "uncovered": []}
+    logger.info(
+        "position_analyze: concentration, industries=%d, concepts=%d, uncovered=%d",
+        len(concentration.get("industry", [])),
+        len(concentration.get("concept", [])),
+        len(concentration.get("uncovered", [])),
+    )
     try:
         sector_context = _build_sector_context(repo, repo.store.data_dir, holdings)
     except Exception as e:  # noqa: BLE001
         logger.debug("build sector context failed: %s", e)
         sector_context = {"industries": [], "concepts": []}
+    logger.info(
+        "position_analyze: sector context, industries=%d, concepts=%d",
+        len(sector_context.get("industries", [])),
+        len(sector_context.get("concepts", [])),
+    )
+    try:
+        settlement_ctx = _build_settlement_context()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("build settlement context failed: %s", e)
+        settlement_ctx = {"available": False}
+    logger.info(
+        "position_analyze: settlement ctx, available=%s, records=%d, realized_pnl=%.2f, anomalies=%d",
+        settlement_ctx.get("available"),
+        settlement_ctx.get("records_count", 0),
+        settlement_ctx.get("realized_pnl", 0),
+        len(settlement_ctx.get("reconcile_anomalies", [])),
+    )
 
     # 3. meta
+    logger.info("position_analyze: meta yield, count=%d", summary["count"])
     yield json.dumps({
         "type": "meta",
         "count": summary["count"],
@@ -656,7 +837,12 @@ async def analyze_positions_stream(
     try:
         from app.services.ai_provider import stream_ai_text
 
-        user_prompt = _build_user_prompt(summary, holdings, market, concentration, sector_context, focus)
+        user_prompt = _build_user_prompt(summary, holdings, market, concentration, sector_context, settlement_ctx, focus)
+        logger.info(
+            "position_analyze: llm start, prompt_len=%d, holdings=%d, focus=%s",
+            len(user_prompt), len(holdings), focus[:30] if focus else "(none)",
+        )
+        chunk_count = 0
         async for delta in stream_ai_text(
             [
                 {"role": "system", "content": _SYSTEM_PROMPT},
@@ -665,13 +851,16 @@ async def analyze_positions_stream(
             temperature=0.5,
             max_tokens=4000,
         ):
+            chunk_count += 1
             yield json.dumps({"type": "delta", "content": delta}, ensure_ascii=False)
+        logger.info("position_analyze: llm done, chunks=%d", chunk_count)
     except Exception as e:  # noqa: BLE001
         logger.exception("AI position analyze failed: %s", e)
         yield json.dumps({"type": "error", "message": f"AI 复盘失败: {e}"}, ensure_ascii=False)
         return
 
     yield json.dumps({"type": "done"}, ensure_ascii=False)
+    logger.info("position_analyze: done")
 
 
 async def analyze_positions_once(

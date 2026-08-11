@@ -37,6 +37,11 @@ export const QK = {
   // 持仓
   positions: ['positions'] as const,
   positionsEnriched: (ext?: string) => ['positions-enriched', ext] as const,
+  positionLogs: (symbol?: string) => ['position-logs', symbol ?? ''] as const,
+  positionCash: ['position-cash'] as const,
+  settlementRecords: (params?: unknown) => ['settlement-records', params ?? {}] as const,
+  settlementStats: ['settlement-stats'] as const,
+  reconcile: ['reconcile'] as const,
   instrumentSearch: (q: string, assetTypes?: string) => ['instrument-search', q, assetTypes ?? 'stock'] as const,
 
   // Screener

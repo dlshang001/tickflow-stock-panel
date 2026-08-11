@@ -264,6 +264,145 @@ export interface PositionEntry {
   name?: string | null
 }
 
+// 操作日志（事件溯源）
+export type PositionOpType = 'buy' | 'sell' | 'clear' | 'initial'
+export type PositionLogSource = 'manual' | 'settlement' | 'migration'
+
+export interface PositionLog {
+  id: number
+  op_date: string
+  op_type: PositionOpType
+  symbol: string
+  name: string
+  price: number | null
+  volume: number | null
+  amount: number | null
+  commission: number
+  stamp_duty: number
+  transfer_fee: number
+  note: string
+  source: PositionLogSource
+  settlement_id: number | null
+  settlement_batch_id: string | null
+  created_at: string
+}
+
+export interface AddTradeRequest {
+  op_type: PositionOpType
+  symbol: string
+  price?: number | null
+  volume?: number | null
+  op_date?: string
+  name?: string
+  commission?: number
+  stamp_duty?: number
+  transfer_fee?: number
+  note?: string
+}
+
+// 交割单
+export interface SettlementRecord {
+  id: number
+  trade_date: string
+  symbol: string
+  name: string
+  direction: string
+  price: number
+  volume: number
+  amount: number
+  commission: number
+  stamp_duty: number
+  transfer_fee: number
+  net_amount: number
+  source: string
+  batch_id: string
+  created_at: string
+}
+
+export interface SettlementSummary {
+  count: number
+  buy_count: number
+  sell_count: number
+  buy_amount: number
+  sell_amount: number
+  commission: number
+  stamp_duty: number
+  transfer_fee: number
+  total_fees: number
+}
+
+export interface SettlementImportResult {
+  dry_run: boolean
+  format: string
+  total_rows: number
+  parse_errors: { row: number; error: string }[]
+  filtered_stats: Record<string, number>
+  // dry-run 预览字段
+  preview?: SettlementRecord[]
+  new_count?: number
+  skipped?: number
+  latest_db_date?: string | null
+  // commit 字段
+  imported?: number
+  batch_id?: string
+}
+
+export interface SettlementRecordsParams {
+  page?: number
+  size?: number
+  date_from?: string
+  date_to?: string
+  symbol?: string
+}
+
+// 对账
+export type ReconDiffType = 'matched' | 'mismatch' | 'only_settlement' | 'only_position_log'
+
+export interface ReconPosSnapshot {
+  shares: number
+  cost_price: number
+  total_cost: number
+}
+
+export interface ReconItem {
+  symbol: string
+  name: string
+  diff_type: ReconDiffType
+  settlement_pos: ReconPosSnapshot | null
+  log_pos: ReconPosSnapshot | null
+  shares_delta: number
+  cost_delta: number
+  total_cost_delta: number
+}
+
+export interface ReconSummary {
+  total: number
+  matched: number
+  mismatch: number
+  only_settlement: number
+  only_position_log: number
+}
+
+export interface ReconResult {
+  items: ReconItem[]
+  summary: ReconSummary
+}
+
+export interface ReconFixRequest {
+  symbol: string
+  action: 'fix' | 'delete'
+}
+
+// 交割单统计（图表用）
+export interface SettlementStats {
+  summary: SettlementSummary
+  realized_pnl_curve: { date: string; pnl: number; cumulative: number }[]
+  monthly: { month: string; pnl: number; buy_amount: number; sell_amount: number }[]
+  by_symbol: { symbol: string; name: string; pnl: number; buy_count: number; sell_count: number }[]
+  fees: { commission: number; stamp_duty: number; transfer_fee: number; total: number }
+  records_count: number
+}
+
 export interface WatchlistImportCandidate {
   code: string
   symbol: string | null
@@ -1677,6 +1816,61 @@ export const api = {
         ? `/api/positions/enriched?ext_columns=${encodeURIComponent(extColumns)}`
         : '/api/positions/enriched',
     ),
+
+  // 操作日志（事件溯源）
+  positionLogs: (symbol?: string) =>
+    request<{ logs: PositionLog[] }>(
+      symbol ? `/api/positions/logs?symbol=${encodeURIComponent(symbol)}` : '/api/positions/logs',
+    ),
+  positionAddTrade: (body: AddTradeRequest) =>
+    request<{ log: PositionLog; rows: PositionEntry[]; free_cash: number }>('/api/positions/logs', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  positionDeleteLog: (id: number) =>
+    request<{ ok: boolean; rows: PositionEntry[] }>(`/api/positions/logs/${id}`, { method: 'DELETE' }),
+  positionGetCash: () => request<{ free_cash: number }>('/api/positions/cash'),
+  positionSetCash: (free_cash: number) =>
+    request<{ free_cash: number }>('/api/positions/cash', {
+      method: 'PUT',
+      body: JSON.stringify({ free_cash }),
+    }),
+
+  // 交割单
+  settlementImport: (file: File, dryRun: boolean) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return request<SettlementImportResult>(
+      `/api/settlement/import?dry_run=${dryRun ? 'true' : 'false'}`,
+      { method: 'POST', body: fd },
+    )
+  },
+  settlementRecords: (params: SettlementRecordsParams) => {
+    const q = new URLSearchParams()
+    q.set('page', String(params.page ?? 1))
+    q.set('size', String(params.size ?? 100))
+    if (params.date_from) q.set('date_from', params.date_from)
+    if (params.date_to) q.set('date_to', params.date_to)
+    if (params.symbol) q.set('symbol', params.symbol)
+    return request<{ rows: SettlementRecord[]; total: number; page: number; size: number; summary: SettlementSummary }>(
+      `/api/settlement/records?${q.toString()}`,
+    )
+  },
+  settlementClear: (batchId?: string) =>
+    request<{ removed: number }>(
+      `/api/settlement/records${batchId ? `?batch_id=${encodeURIComponent(batchId)}` : ''}`,
+      { method: 'DELETE' },
+    ),
+  settlementStats: () =>
+    request<SettlementStats>('/api/settlement/stats'),
+  // 对账
+  reconcileList: () =>
+    request<ReconResult>('/api/settlement/reconcile'),
+  reconcileFix: (symbol: string, action: 'fix' | 'delete') =>
+    request<ReconResult & { ok: boolean; action: string; symbol: string; diff_type: string }>('/api/settlement/reconcile/fix', {
+      method: 'POST',
+      body: JSON.stringify({ symbol, action }),
+    }),
   positionReportsList: () => request<{ reports: any[] }>('/api/positions/reports'),
   positionReportDelete: (id: string) =>
     request<{ ok: boolean }>(`/api/positions/reports/${encodeURIComponent(id)}`, { method: 'DELETE' }),
@@ -2266,7 +2460,47 @@ export const api = {
     }
   },
 
-  /** AI 概念轮动分析 — 流式 NDJSON。 */
+  /** AI 交割单分析 — 威科夫交易行为分析 Skill，流式 NDJSON。 */
+  async *settlementAnalyzeStream(focus?: string): AsyncGenerator<{
+    type: 'meta' | 'delta' | 'error' | 'done'
+    summary?: any
+    as_of?: string
+    content?: string
+    message?: string
+  }> {
+    const res = await fetch('/api/settlement/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ focus: focus ?? '' }),
+    })
+    if (!res.ok) {
+      let detail = ''
+      try { const j = JSON.parse(await res.text()); detail = j.detail ?? j.message ?? '' } catch { /* ignore */ }
+      const msg = detail || `${res.status} ${res.statusText}`
+      toast(msg, 'error')
+      throw new Error(msg)
+    }
+    if (!res.body) throw new Error('响应无 body')
+
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    for (; ;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      const lines = buf.split('\n')
+      buf = lines.pop() ?? ''
+      for (const line of lines) {
+        const s = line.trim()
+        if (!s) continue
+        try { yield JSON.parse(s) } catch { /* ignore */ }
+      }
+    }
+    if (buf.trim()) {
+      try { yield JSON.parse(buf.trim()) } catch { /* ignore */ }
+    }
+  },
   async *rotationAnalyzeStream(days: number, focus?: string, kind?: 'concept' | 'industry', level?: number): AsyncGenerator<{
     type: 'meta' | 'delta' | 'error' | 'done'
     days?: number

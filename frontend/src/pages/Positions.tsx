@@ -1,8 +1,7 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Trash2, Pencil, Check, Crosshair, Settings2, Sparkles, X, Copy, RefreshCw, History, CalendarClock } from 'lucide-react'
-import { useLocation } from 'react-router-dom'
-import { api, type PositionEntry, type KlineRow, type MinuteKlineRow } from '@/lib/api'
+import { Trash2, Sparkles, X, Copy, RefreshCw, History, CalendarClock, Plus, Settings2, TrendingDown, Eraser, Check } from 'lucide-react'
+import { api, type KlineRow, type MinuteKlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { fmtPrice, priceColorClass, fmtBigNum } from '@/lib/format'
 import { boardTag, renderBuiltinDataCell } from '@/components/stock-table/primitives'
@@ -16,13 +15,17 @@ import { toast } from '@/components/Toast'
 import { cn } from '@/lib/cn'
 import { startAnalysis as startStockAnalysis } from '@/lib/stockAnalysisStore'
 import { ListColumnCustomizer } from '@/components/ListColumnCustomizer'
-import { StockSearchSelect } from '@/components/StockSearchSelect'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { COLUMN_GROUPS, BUILTIN_COLUMNS, loadColumnConfig, saveColumnConfig, type ColumnConfig } from '@/lib/positions-columns'
+import { TradeDialog, type TradeMode } from '@/components/positions/TradeDialog'
+import { CashOverview } from '@/components/positions/CashOverview'
+import { OperationTimeline } from '@/components/positions/OperationTimeline'
+import { SettlementImport } from '@/components/positions/SettlementImport'
+import { SettlementRecords } from '@/components/positions/SettlementRecords'
+import { ReconcilePanel } from '@/components/positions/ReconcilePanel'
 
-const inputCls = 'h-9 px-3 rounded-lg border border-border bg-elevated text-sm text-foreground outline-none focus:border-accent transition-colors'
 const btnPrimary = 'inline-flex items-center gap-1.5 h-9 px-3 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accent/90 disabled:opacity-40 transition-colors'
 const btnGhost = 'inline-flex items-center h-9 px-3 rounded-lg border border-border text-sm text-secondary hover:text-foreground transition-colors'
 
@@ -30,7 +33,6 @@ function priceOf(r: any) { return r.close }
 
 export function Positions() {
   const qc = useQueryClient()
-  const location = useLocation() as { state?: { symbol?: string; anchor_price?: number | null } }
 
   const [columns, setColumns] = useState<ColumnConfig[]>(() => [...BUILTIN_COLUMNS])
   const columnsLoaded = useRef(false)
@@ -40,7 +42,30 @@ export function Positions() {
     loadColumnConfig().then(setColumns)
   }, [])
   const [customizerOpen, setCustomizerOpen] = useState(false)
-  const [editing, setEditing] = useState<PositionEntry | null>(null)
+
+  // Tab：持仓 / 交割单 / 对账
+  const [tab, setTab] = useState<'holdings' | 'settlement' | 'reconcile'>('holdings')
+
+  // 交易弹窗
+  const [trade, setTrade] = useState<{
+    mode: TradeMode
+    symbol?: string
+    name?: string
+    shares?: number
+    cost?: number
+  } | null>(null)
+  const openTrade = (
+    mode: TradeMode,
+    row?: { symbol: string; name?: string | null; shares?: number; cost_price?: number },
+  ) => {
+    setTrade({
+      mode,
+      symbol: row?.symbol,
+      name: row?.name ?? '',
+      shares: row?.shares,
+      cost: row?.cost_price,
+    })
+  }
 
   // 个股预览弹窗
   const [previewSymbol, setPreviewSymbol] = useState<string | null>(null)
@@ -50,31 +75,12 @@ export function Positions() {
   }
   const closePreview = () => { setPreviewSymbol(null); setPreviewName('') }
 
-  const [form, setForm] = useState({
-    symbol: '', shares: '', cost_price: '', opened_at: '', note: '',
-  })
-
-  // 从大喵票池「转入持仓」带入
-  useEffect(() => {
-    const s = location.state
-    if (s?.symbol) {
-      const sym = s.symbol
-      setForm(f => ({
-        ...f,
-        symbol: sym,
-        cost_price: s.anchor_price != null ? String(s.anchor_price) : f.cost_price,
-      }))
-      window.history.replaceState(null, '')
-    }
-  }, [location.state])
-
   const list = useQuery({ queryKey: QK.positions, queryFn: api.positionsList })
   const enriched = useQuery({
     queryKey: QK.positionsEnriched(),
     queryFn: () => api.positionsEnriched(),
     enabled: (list.data?.rows.length ?? 0) > 0,
   })
-  const damiaoList = useQuery({ queryKey: QK.damiaoPool, queryFn: api.damiaoPoolList })
 
   const rows = useMemo(() => {
     const posRows = list.data?.rows ?? []
@@ -123,37 +129,34 @@ export function Positions() {
   })
   const minuteData: Record<string, MinuteKlineRow[]> = intradayVisible ? (minuteBatch.data?.data ?? {}) : {}
 
-  const upsertMut = useMutation({
-    mutationFn: api.positionsUpsert,
-    onSuccess: (data) => {
-      qc.setQueryData(QK.positions, { rows: data.rows })
-      qc.invalidateQueries({ queryKey: QK.positions })
-      qc.invalidateQueries({ queryKey: ['positions-enriched'] })
-      setForm({ symbol: '', shares: '', cost_price: '', opened_at: '', note: '' })
-      setEditing(null)
-    },
-  })
-  const updateMut = useMutation({
-    mutationFn: (vars: { symbol: string; body: any }) => api.positionsUpdate(vars.symbol, vars.body),
-    onSuccess: (data) => {
-      qc.setQueryData(QK.positions, { rows: data.rows })
-      qc.invalidateQueries({ queryKey: ['positions-enriched'] })
-      setEditing(null)
-    },
-  })
-  const removeMut = useMutation({
-    mutationFn: api.positionsRemove,
-    onSuccess: (data) => {
-      qc.setQueryData(QK.positions, { rows: data.rows })
-      qc.invalidateQueries({ queryKey: ['positions-enriched'] })
-    },
-  })
   const clearMut = useMutation({
     mutationFn: api.positionsClear,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.positions })
       qc.invalidateQueries({ queryKey: ['positions-enriched'] })
+      qc.invalidateQueries({ queryKey: QK.positionLogs() })
     },
+  })
+
+  // 快速移除：按成本价写入一条清仓记录（实现旧"删除"语义，不产生实际盈亏）
+  const removeMut = useMutation({
+    mutationFn: (r: { symbol: string; shares: number; cost_price: number; name?: string }) =>
+      api.positionAddTrade({
+        op_type: 'clear',
+        symbol: r.symbol,
+        name: r.name,
+        price: r.cost_price,
+        volume: r.shares,
+        note: '移除持仓',
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: QK.positions })
+      qc.invalidateQueries({ queryKey: QK.positionsEnriched() })
+      qc.invalidateQueries({ queryKey: QK.positionLogs() })
+      qc.invalidateQueries({ queryKey: QK.positionCash })
+      toast('持仓已移除', 'success')
+    },
+    onError: (e: Error) => toast(e.message, 'error'),
   })
 
   // 汇总
@@ -189,16 +192,9 @@ export function Positions() {
 
   const totalMv = summary.marketValue
 
-  const bringAnchor = () => {
-    const sym = form.symbol.trim()
-    if (!sym) return
-    const rec = damiaoList.data?.rows.find(r => r.symbol === sym)
-    if (rec?.anchor_price != null) {
-      setForm(f => ({ ...f, cost_price: String(rec.anchor_price) }))
-    }
-  }
-
   // ===== AI 持仓复盘 =====
+  type AiMode = 'holdings' | 'settlement' | 'reconcile'
+  const [aiMode, setAiMode] = useState<AiMode>('holdings')
   const [aiOpen, setAiOpen] = useState(false)
   const [aiStarted, setAiStarted] = useState(false) // 是否已发起过本轮复盘(区分"刚打开"与"分析中")
   const [aiLoading, setAiLoading] = useState(false)
@@ -264,7 +260,9 @@ export function Positions() {
   }
 
   const runAiReview = async (focus = '') => {
-    if (rows.length === 0) return
+    // settlement/reconcile 模式使用独立的交割单分析 skill
+    const useSettlementSkill = aiMode === 'settlement' || aiMode === 'reconcile'
+    if (!useSettlementSkill && rows.length === 0) return
     setAiOpen(true)
     setViewing(null)
     setAiLoading(true)
@@ -276,7 +274,10 @@ export function Positions() {
     loadHistory()
     try {
       let first = true
-      for await (const chunk of api.positionAnalyzeStream(focus)) {
+      const streamFn = useSettlementSkill
+        ? (f: string) => api.settlementAnalyzeStream(f)
+        : (f: string) => api.positionAnalyzeStream(f)
+      for await (const chunk of streamFn(focus)) {
         if (aiAbortRef.current) return
         switch (chunk.type) {
           case 'meta':
@@ -288,7 +289,7 @@ export function Positions() {
             break
           case 'error':
             setAiLoading(false)
-            setAiError(chunk.message ?? '复盘失败')
+            setAiError(chunk.message ?? '分析失败')
             return
           case 'done':
             setAiLoading(false)
@@ -296,11 +297,10 @@ export function Positions() {
         }
       }
       if (first && !aiAbortRef.current) { setAiLoading(false); setAiError('未返回内容,请重试') }
-      // 流结束后后端已自动归档,刷新历史列表
       loadHistory()
     } catch (e: any) {
       setAiLoading(false)
-      setAiError(String(e?.message ?? '复盘失败'))
+      setAiError(String(e?.message ?? '分析失败'))
     }
   }
 
@@ -309,8 +309,48 @@ export function Positions() {
     setAiOpen(false)
   }
 
+  // ===== AI 模式配置 =====
+  const aiModeConfig: Record<AiMode, {
+    title: string
+    subtitle: string
+    desc: string
+    placeholder: string
+    defaultFocus: string
+    loadingText: string
+    buttonText: string
+  }> = {
+    holdings: {
+      title: 'AI 持仓复盘',
+      subtitle: '客观复盘持仓结构、集中度与风险',
+      desc: '综合持仓盈亏、行业/概念集中度、当日板块强弱与大盘环境，生成客观组合复盘。',
+      placeholder: '想重点看什么？如：医药仓位、风险点（可选，回车重新复盘）',
+      defaultFocus: '',
+      loadingText: 'AI 正在复盘持仓…',
+      buttonText: '开始复盘',
+    },
+    settlement: {
+      title: 'AI 交割单分析',
+      subtitle: '基于交割单的交易盈亏与费用回顾',
+      desc: '综合交割单已实现盈亏、月度交易节奏、单票盈亏排行与费用构成，结合持仓上下文生成交易复盘。',
+      placeholder: '想重点看什么？如：本月盈亏、佣金占比、某标的交易得失（可选）',
+      defaultFocus: '交割单盈亏回顾、交易节奏与费用分析',
+      loadingText: 'AI 正在分析交割单…',
+      buttonText: '开始分析',
+    },
+    reconcile: {
+      title: 'AI 对账分析',
+      subtitle: '对账差异复盘与持仓一致性检查',
+      desc: '对比交割单与操作日志的持仓差异，分析异常标的并给出修正建议，同时回顾已实现盈亏。',
+      placeholder: '想重点看什么？如：对账异常原因、某标的持仓差异（可选）',
+      defaultFocus: '对账异常分析、持仓一致性检查与交割单盈亏回顾',
+      loadingText: 'AI 正在分析对账…',
+      buttonText: '开始分析',
+    },
+  }
+
   // 仅打开弹窗(不自动复盘):让用户能先看历史,或手动点"开始复盘"
-  const openAi = () => {
+  const openAi = (mode: AiMode = 'holdings') => {
+    setAiMode(mode)
     setAiOpen(true)
     setViewing(null)
     setAiStarted(false)
@@ -318,6 +358,10 @@ export function Positions() {
     setAiError('')
     setAiContent('')
     setAiMeta(null)
+    // 首次打开时用模式默认 focus,用户未修改过则自动填入
+    if (!aiFocus) {
+      setAiFocus(aiModeConfig[mode].defaultFocus)
+    }
     loadHistory()
   }
 
@@ -336,41 +380,6 @@ export function Positions() {
       `${pnlAmt != null ? '(' + (pnlAmt > 0 ? '+' : '') + pnlAmt.toFixed(0) + '元)' : ''},` +
       `${r.opened_at ? '建仓日' + r.opened_at : ''}。请在分析时客观对照我的持仓成本。`
     startStockAnalysis(r.symbol, r.name || '', context)
-  }
-
-  const handleSubmit = () => {
-    if (!form.symbol.trim() || form.shares === '' || form.cost_price === '') return
-    if (editing) {
-      updateMut.mutate({
-        symbol: editing.symbol,
-        body: {
-          shares: Number(form.shares),
-          cost_price: Number(form.cost_price),
-          opened_at: form.opened_at || '',
-          note: form.note,
-        },
-      })
-    } else {
-      upsertMut.mutate({
-        symbol: form.symbol.trim(),
-        shares: Number(form.shares),
-        cost_price: Number(form.cost_price),
-        opened_at: form.opened_at || '',
-        note: form.note,
-      })
-    }
-  }
-
-  const startEdit = (r: PositionEntry) => {
-    setEditing(r)
-    setForm({
-      symbol: r.symbol, shares: String(r.shares), cost_price: String(r.cost_price),
-      opened_at: r.opened_at ?? '', note: r.note ?? '',
-    })
-  }
-  const cancelEdit = () => {
-    setEditing(null)
-    setForm({ symbol: '', shares: '', cost_price: '', opened_at: '', note: '' })
   }
 
   const visibleColumns = useMemo(() => columns.filter(c => c.visible), [columns])
@@ -461,7 +470,13 @@ export function Positions() {
         right={
           <div className="flex items-center gap-2">
             <button
-              onClick={openAi}
+              onClick={() => openTrade('buy')}
+              className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-bull text-white text-xs font-medium hover:bg-bull/90 transition-colors"
+            >
+              <Plus className="h-3.5 w-3.5" /> 买入
+            </button>
+            <button
+              onClick={() => openAi('holdings')}
               disabled={rows.length === 0}
               className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white text-xs font-medium hover:opacity-90 disabled:opacity-40 transition-opacity"
               title="AI 复盘当前全部持仓"
@@ -488,31 +503,32 @@ export function Positions() {
         }
       />
 
-      {/* 录入表单 */}
-      <div className="mt-4 p-3 rounded-card border border-border bg-panel flex flex-wrap items-center gap-2">
-        {editing && <span className="text-xs text-accent">正在编辑 {editing.symbol}</span>}
-        <StockSearchSelect
-          value={form.symbol}
-          onSelect={(sym) => setForm(f => ({ ...f, symbol: sym }))}
-          existingSymbols={rows.map(r => r.symbol)}
-          placeholder="搜索代码/名称"
-          widthClass="w-56"
-          disabled={!!editing}
-        />
-        <input className={`${inputCls} w-24`} type="number" step="100" placeholder="持股数" value={form.shares} onChange={e => setForm(f => ({ ...f, shares: e.target.value }))} />
-        <div className="flex items-center gap-1">
-          <input className={`${inputCls} w-28`} type="number" step="0.01" placeholder="成本价" value={form.cost_price} onChange={e => setForm(f => ({ ...f, cost_price: e.target.value }))} />
-          <button type="button" onClick={bringAnchor} title="从大喵票池带入该代码的锚定价" className="inline-flex items-center justify-center h-9 w-9 rounded-lg border border-border text-secondary hover:text-accent transition-colors">
-            <Crosshair className="h-4 w-4" />
+      {/* Tab 切换 */}
+      <div className="mt-4 flex items-center gap-1 border-b border-border">
+        {([
+          { key: 'holdings', label: '持仓' },
+          { key: 'settlement', label: '交割单' },
+          { key: 'reconcile', label: '对账' },
+        ] as const).map(t => (
+          <button
+            key={t.key}
+            onClick={() => setTab(t.key)}
+            className={cn(
+              'relative -mb-px px-4 py-2 text-xs font-medium transition-colors',
+              tab === t.key ? 'text-foreground' : 'text-muted hover:text-secondary',
+            )}
+          >
+            {t.label}
+            {tab === t.key && <span className="absolute inset-x-3 -bottom-px h-0.5 rounded-full bg-accent" />}
           </button>
-        </div>
-        <input type="date" className={`${inputCls} w-36`} value={form.opened_at} onChange={e => setForm(f => ({ ...f, opened_at: e.target.value }))} />
-        <input className={`${inputCls} flex-1 min-w-[160px]`} placeholder="备注，如 低吸/尾盘埋伏" value={form.note} onChange={e => setForm(f => ({ ...f, note: e.target.value }))} />
-        <button className={btnPrimary} disabled={upsertMut.isPending || updateMut.isPending || !form.symbol.trim() || form.shares === '' || form.cost_price === ''} onClick={handleSubmit}>
-          {editing ? <Check className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
-          {editing ? '保存' : '加入持仓'}
-        </button>
-        {editing && <button className={btnGhost} onClick={cancelEdit}>取消</button>}
+        ))}
+      </div>
+
+      {tab === 'holdings' && (
+      <>
+      {/* 现金 / 总资产概览 */}
+      <div className="mt-4">
+        <CashOverview marketValue={summary.marketValue} />
       </div>
 
       {/* 汇总条 */}
@@ -547,7 +563,7 @@ export function Positions() {
 
       {/* 表格 */}
       {rows.length === 0 ? (
-        <EmptyState title="还没有持仓" hint="录入代码、股数和成本价，实时查看盈亏。" />
+        <EmptyState title="还没有持仓" hint="点击右上角「买入」记录一笔建仓交易，实时查看盈亏。" />
       ) : (
         <div className="mt-3 rounded-card border border-border overflow-x-auto bg-panel">
           <table className="w-full text-sm">
@@ -556,7 +572,7 @@ export function Positions() {
                 {visibleColumns.map(col => (
                   <th key={col.id} className={`px-3 py-2.5 font-medium text-muted text-xs whitespace-nowrap ${col.align === 'left' ? 'text-left' : col.align === 'right' ? 'text-right' : 'text-center'}`}>{col.label}</th>
                 ))}
-                <th className="px-3 py-2.5 text-right text-muted text-xs w-24">操作</th>
+                <th className="px-3 py-2.5 text-right text-muted text-xs w-28">操作</th>
               </tr>
             </thead>
             <tbody>
@@ -564,16 +580,44 @@ export function Positions() {
                 <tr key={r.symbol} className="border-t border-border hover:bg-elevated/40 transition-colors">
                   {visibleColumns.map(col => <React.Fragment key={col.id}>{renderCell(r, col)}</React.Fragment>)}
                   <td className="px-3 py-2">
-                    <div className="flex items-center justify-end gap-1 text-xs">
+                    <div className="flex items-center justify-end gap-0.5 text-xs">
                       <button className="p-1 text-muted hover:text-violet-400" title="AI 个股分析(带入持仓上下文)" onClick={() => analyzeOne(r)}><Sparkles className="h-3.5 w-3.5" /></button>
-                      <button className="p-1 text-muted hover:text-accent" title="编辑" onClick={() => startEdit(r)}><Pencil className="h-3.5 w-3.5" /></button>
-                      <button className="p-1 text-muted hover:text-danger" title="删除" onClick={() => { if (confirm(`删除 ${r.symbol} 的持仓？`)) removeMut.mutate(r.symbol) }}><Trash2 className="h-3.5 w-3.5" /></button>
+                      <button className="p-1 text-muted hover:text-bull" title="加仓" onClick={() => openTrade('buy', r)}><Plus className="h-3.5 w-3.5" /></button>
+                      <button className="p-1 text-muted hover:text-bear" title="减仓" onClick={() => openTrade('sell', r)}><TrendingDown className="h-3.5 w-3.5" /></button>
+                      <button className="p-1 text-muted hover:text-warning" title="清仓" onClick={() => openTrade('clear', r)}><Eraser className="h-3.5 w-3.5" /></button>
+                      <button className="p-1 text-muted hover:text-danger disabled:opacity-40" disabled={removeMut.isPending} title="移除持仓" onClick={() => { if (confirm(`移除 ${r.symbol} 的持仓？将按成本价写入一条清仓记录。`)) removeMut.mutate({ symbol: r.symbol, name: r.name, shares: Number(r.shares), cost_price: Number(r.cost_price) }) }}><Trash2 className="h-3.5 w-3.5" /></button>
                     </div>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* 操作历史时间线 */}
+      <div className="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="lg:col-span-2">
+          <OperationTimeline />
+        </div>
+      </div>
+      </>
+      )}
+
+      {tab === 'settlement' && (
+        <div className="mt-4 grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <div className="lg:col-span-1">
+            <SettlementImport />
+          </div>
+          <div className="lg:col-span-2">
+            <SettlementRecords onAnalyze={() => openAi('settlement')} />
+          </div>
+        </div>
+      )}
+
+      {tab === 'reconcile' && (
+        <div className="mt-4">
+          <ReconcilePanel onAnalyze={() => openAi('reconcile')} />
         </div>
       )}
 
@@ -676,6 +720,19 @@ export function Positions() {
         onClose={closePreview}
       />
 
+      {trade && (
+        <TradeDialog
+          open={!!trade}
+          mode={trade.mode}
+          initialSymbol={trade.symbol}
+          initialName={trade.name}
+          initialShares={trade.shares}
+          initialCost={trade.cost}
+          existingSymbols={rows.map(r => r.symbol)}
+          onClose={() => setTrade(null)}
+        />
+      )}
+
       {aiOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={closeAi} />
@@ -687,13 +744,13 @@ export function Positions() {
                   <Sparkles className="h-4 w-4" />
                 </span>
                 <div>
-                  <div className="text-sm font-semibold text-foreground">AI 持仓复盘</div>
+                  <div className="text-sm font-semibold text-foreground">{aiModeConfig[aiMode].title}</div>
                   <div className="text-[11px] text-muted">
                     {viewing
                       ? `查看历史 · ${viewing.as_of || ''}`
                       : aiMeta
                         ? `${aiMeta.count ?? 0} 只持仓 · 总市值 ${fmtBigNum(aiMeta.total_market_value ?? 0)} · 浮盈亏 ${aiMeta.total_pnl_pct != null ? (aiMeta.total_pnl_pct > 0 ? '+' : '') + aiMeta.total_pnl_pct + '%' : '—'}`
-                        : '客观复盘持仓结构、集中度与风险'}
+                        : aiModeConfig[aiMode].subtitle}
                   </div>
                 </div>
               </div>
@@ -722,7 +779,7 @@ export function Positions() {
               <Sparkles className="h-3.5 w-3.5 shrink-0 text-violet-400" />
               <input
                 className="flex-1 h-9 px-3 rounded-lg border border-border bg-elevated text-sm text-foreground outline-none focus:border-violet-400/50 transition-colors"
-                placeholder="想重点看什么？如：医药仓位、风险点（可选，回车重新复盘）"
+                placeholder={aiModeConfig[aiMode].placeholder}
                 value={aiFocus}
                 onChange={e => setAiFocus(e.target.value)}
               />
@@ -741,7 +798,7 @@ export function Positions() {
                       ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-violet-400" />
                       : <Sparkles className="h-3.5 w-3.5 text-violet-400" />}
                     <span className="text-xs font-medium text-foreground">
-                      {viewing ? '历史复盘报告' : aiLoading ? 'AI 正在复盘…' : '复盘报告'}
+                      {viewing ? '历史报告' : aiLoading ? aiModeConfig[aiMode].loadingText.replace('…', '') + '…' : '分析报告'}
                     </span>
                   </div>
                   {viewing && (
@@ -767,7 +824,7 @@ export function Positions() {
                           <Sparkles className="h-5 w-5 animate-pulse text-violet-400" />
                         </span>
                       </div>
-                      <div className="text-sm text-foreground">AI 正在复盘持仓…</div>
+                      <div className="text-sm text-foreground">{aiModeConfig[aiMode].loadingText}</div>
                       <div className="text-xs text-secondary">分析盈亏结构 · 行业集中度 · 板块强弱 · 风险点</div>
                     </div>
                   ) : !aiStarted && !aiContent ? (
@@ -778,16 +835,16 @@ export function Positions() {
                         </span>
                       </div>
                       <div>
-                        <div className="text-sm font-medium text-foreground">AI 持仓复盘</div>
+                        <div className="text-sm font-medium text-foreground">{aiModeConfig[aiMode].title}</div>
                         <p className="mx-auto mt-1.5 max-w-xs text-xs leading-relaxed text-secondary">
-                          综合持仓盈亏、行业/概念集中度、当日板块强弱与大盘环境,生成客观组合复盘。
+                          {aiModeConfig[aiMode].desc}
                         </p>
                       </div>
                       <button
                         className="inline-flex items-center gap-1.5 h-9 px-4 rounded-lg bg-gradient-to-r from-violet-500 to-fuchsia-500 text-white text-xs font-medium hover:opacity-90 transition-opacity"
                         onClick={() => runAiReview(aiFocus)}
                       >
-                        <Sparkles className="h-3.5 w-3.5" /> 开始复盘
+                        <Sparkles className="h-3.5 w-3.5" /> {aiModeConfig[aiMode].buttonText}
                       </button>
                       <p className="text-[11px] text-muted">也可直接在右侧查看历史复盘报告</p>
                     </div>
@@ -828,7 +885,7 @@ export function Positions() {
                           </div>
                           <div className="min-w-0 flex-1">
                             <div className="text-[11px] font-medium text-violet-300">生成中…</div>
-                            <div className="mt-0.5 text-[10px] text-secondary">AI 正在复盘当前持仓</div>
+                            <div className="mt-0.5 text-[10px] text-secondary">{aiModeConfig[aiMode].loadingText}</div>
                           </div>
                         </div>
                       )}

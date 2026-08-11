@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, RefreshCw, Clock } from 'lucide-react'
+import { X, RefreshCw, Clock, TrendingUp } from 'lucide-react'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cnSignal } from '@/lib/signals'
@@ -11,6 +11,17 @@ import { RuleEditor } from '@/components/monitor/RuleEditor'
 import { usePreferences, useQuoteStatus } from '@/lib/useSharedQueries'
 import { setFocusSymbol, clearFocusSymbol } from '@/lib/useQuoteStream'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
+import { TradeKlineMarkers, type TradeMarkerSummary } from '@/components/positions/charts/TradeKlineMarkers'
+
+const DIALOG_TAG = '[StockPreviewDialog]'
+/**
+ * 控制台过滤关键词：DevTools Console → Filter 输入：
+ *   [SPD:lifecycle] — Dialog 打开/切换/关闭 symbol 生命周期
+ *   [StockPreviewDialog] — 该组件全部日志
+ */
+const SPD_SUB = {
+  lifecycle: `${DIALOG_TAG} [SPD:lifecycle]`,
+} as const
 
 interface Props {
   symbol: string | null
@@ -47,6 +58,14 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
   const [showMonitorEditor, setShowMonitorEditor] = useState(false)
   const qc = useQueryClient()
   const backdrop = useDialogBackdrop(onClose)
+
+  // symbol 生命周期日志（打开/关闭/切换）
+  useEffect(() => {
+    console.debug(`${SPD_SUB.lifecycle} mount symbol=${symbol} name=${name ?? ''}`)
+    return () => {
+      console.debug(`${SPD_SUB.lifecycle} unmount/switch symbol=${symbol}`)
+    }
+  }, [symbol, name])
 
   const watchlist = useQuery({
     queryKey: QK.watchlist,
@@ -255,17 +274,49 @@ export function StockPreviewDialog({ symbol, name, onClose, triggerInfo }: Props
 
             {/* K 线内容 */}
             <div className="flex-1 overflow-auto p-4">
-              <StockPanel
-                symbol={symbol}
-                height={420}
-                showIntraday={showIntraday}
-                onSelectDate={() => { if (!showIntraday) setShowIntraday(true) }}
-                dateRange={dateRange}
-                onMonitor={() => setShowMonitorEditor(true)}
-                inWatchlist={inWatchlist}
-                onToggleWatchlist={() => toggleWatchlist.mutate()}
-                refetchIntervalMs={intradayRefetchMs}
-              />
+              <TradeKlineMarkers symbol={symbol}>
+                {({ markers, buyCount, sellCount, clearCount, buyVolume, sellVolume, lastOp }: TradeMarkerSummary) => (
+                  <>
+                    <StockPanel
+                      symbol={symbol}
+                      height={420}
+                      showIntraday={showIntraday}
+                      onSelectDate={() => { if (!showIntraday) setShowIntraday(true) }}
+                      dateRange={dateRange}
+                      markers={markers}
+                      onMonitor={() => setShowMonitorEditor(true)}
+                      inWatchlist={inWatchlist}
+                      onToggleWatchlist={() => toggleWatchlist.mutate()}
+                      refetchIntervalMs={intradayRefetchMs}
+                    />
+                    {/* 交易点摘要条 */}
+                    {(buyCount > 0 || sellCount > 0) && (
+                      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-border/50 pt-2 text-[11px] text-muted">
+                        <div className="flex items-center gap-1">
+                          <TrendingUp className="h-3 w-3 text-accent" strokeWidth={1.5} />
+                          <span>成交标注</span>
+                        </div>
+                        <div>
+                          买入 <span className="text-bull font-medium">{buyCount}</span> 笔 / <span className="text-bull">{buyVolume.toLocaleString('zh-CN')}</span> 股
+                        </div>
+                        <div>
+                          卖出 <span className="text-bear font-medium">{sellCount - clearCount}</span> 笔 / 清仓 <span className="text-bear">{clearCount}</span> 次 / <span className="text-bear">{sellVolume.toLocaleString('zh-CN')}</span> 股
+                        </div>
+                        {lastOp && (
+                          <div>
+                            最近：<span className="text-foreground/80">
+                              {lastOp.op_date?.slice?.(0, 10) ?? '--'} · {lastOp.op_type === 'buy' ? '买入' : lastOp.op_type === 'sell' ? '卖出' : lastOp.op_type === 'clear' ? '清仓' : lastOp.op_type}
+                              {lastOp.price != null && ` · ¥${Number(lastOp.price).toFixed(2)}`}
+                              {lastOp.volume != null && lastOp.volume > 0 && ` · ${Number(lastOp.volume)}股`}
+                              {lastOp.source === 'settlement' ? ' · 来源：交割单' : lastOp.source === 'migration' ? ' · 来源：迁移' : lastOp.source === 'manual' ? ' · 来源：手动' : lastOp.source ? ` · 来源：${lastOp.source}` : ''}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </>
+                )}
+              </TradeKlineMarkers>
             </div>
 
             {/* 加监控编辑器弹层 */}

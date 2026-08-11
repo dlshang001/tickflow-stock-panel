@@ -4,14 +4,16 @@ from __future__ import annotations
 import json
 import logging
 import time
+from typing import Literal
 
 import polars as pl
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.api.watchlist import _WATCHLIST_COLS
 from app.services import positions
+from app.services import position_log
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +97,90 @@ def remove_one(symbol: str, request: Request):
 @router.delete("")
 def clear_all():
     return {"removed": positions.clear()}
+
+
+# ---------------------------------------------------------------------------
+# 操作日志（事件溯源）— 阶段 1
+# ---------------------------------------------------------------------------
+
+class AddLogRequest(BaseModel):
+    op_type: Literal["buy", "sell", "clear"]
+    symbol: str
+    price: float | None = None
+    volume: float | None = None
+    op_date: str | None = None
+    name: str = ""
+    commission: float = 0
+    stamp_duty: float = 0
+    transfer_fee: float = 0
+    note: str = ""
+
+
+class CashRequest(BaseModel):
+    free_cash: float = Field(..., ge=0)
+
+
+@router.get("/logs")
+def list_logs(symbol: str | None = Query(None)):
+    """操作日志列表，按 (op_date, id) 升序。"""
+    return {"logs": position_log.list_logs(symbol)}
+
+
+@router.post("/logs")
+def add_log(req: AddLogRequest):
+    """写入一笔买入/卖出/清仓操作，联动可用资金。
+
+    返回交易后的当前持仓与现金。业务校验失败返回 400。
+    """
+    try:
+        result = position_log.add_trade(
+            op_type=req.op_type,
+            symbol=req.symbol,
+            price=req.price,
+            volume=req.volume,
+            op_date=req.op_date,
+            name=req.name,
+            commission=req.commission,
+            stamp_duty=req.stamp_duty,
+            transfer_fee=req.transfer_fee,
+            note=req.note,
+            source="manual",
+        )
+    except position_log.TradeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {
+        "log": result.log,
+        "rows": result.positions,
+        "free_cash": result.free_cash,
+    }
+
+
+@router.delete("/logs/{log_id}")
+def delete_log(log_id: int):
+    ok = position_log.delete_log(log_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="日志不存在")
+    return {
+        "ok": True,
+        "rows": [
+            {
+                "symbol": p.symbol, "name": p.name, "shares": p.shares,
+                "cost_price": p.cost_price, "opened_at": p.opened_at,
+                "note": p.note, "added_at": p.added_at,
+            }
+            for p in position_log.compute_positions()
+        ],
+    }
+
+
+@router.get("/cash")
+def get_cash():
+    return {"free_cash": position_log.get_free_cash()}
+
+
+@router.put("/cash")
+def set_cash(req: CashRequest):
+    return {"free_cash": position_log.set_free_cash(req.free_cash)}
 
 
 @router.get("/enriched")
