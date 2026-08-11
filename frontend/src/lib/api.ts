@@ -1875,6 +1875,11 @@ export const api = {
   positionReportDelete: (id: string) =>
     request<{ ok: boolean }>(`/api/positions/reports/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
+  // ===== 交割单分析报告 =====
+  settlementReportsList: () => request<{ reports: any[] }>('/api/settlement/reports'),
+  settlementReportDelete: (id: string) =>
+    request<{ ok: boolean }>(`/api/settlement/reports/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
   screenerStrategies: async (assetType?: 'stock' | 'etf') => {
     const data = await request<{ strategies: StrategyDetail[]; load_errors?: StrategyLoadError[] }>(
       `/api/strategies?${assetType ? `asset_type=${assetType}&` : ''}timeframe=1d`,

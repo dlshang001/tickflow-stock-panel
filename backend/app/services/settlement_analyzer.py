@@ -316,6 +316,8 @@ def _build_stats_for_settlement() -> dict:
         "records_count": records_count,
     }
 
+    return result
+
 
 async def analyze_settlement_stream(
     focus: str = "",

@@ -1,21 +1,25 @@
 /**
- * AI 大盘复盘页 —— 以流式 LLM 复盘报告为主体的盘后复盘工作台。
+ * AI 复盘页 —— 以流式 LLM 报告为主体的盘后复盘工作台。
+ *
+ * 支持三种分析类型(tab 切换,与 URL `?tab=` 同步):
+ *  - market:     大盘复盘(GET /api/overview/market + POST /api/market-recap/analyze)
+ *  - holdings:   持仓分析(POST /api/positions/analyze)
+ *  - settlement: 交割单分析(POST /api/settlement/analyze)
  *
  * 设计定位:极简专注型。不复刻 Dashboard 的看板(KPI/雷达/板块排名),
- * 仅保留一行「市场摘要条」作为报告上下文参照;AI 报告 + 历史归档是页面主体。
- *  - 摘要数据:GET /api/overview/market
- *  - 报告流式:POST /api/market-recap/analyze
+ * 仅保留一行「摘要条」作为报告上下文参照;AI 报告 + 历史归档是页面主体。
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   BookOpenCheck, RefreshCw, Sparkles, Trash2, History, ChevronRight, AlertTriangle,
   Database, Wand2, Copy, Download, Clock, X, Check,
+  BarChart3, Wallet, Receipt,
 } from 'lucide-react'
 
-import { api, type OverviewMarket, type AiReviewReport } from '@/lib/api'
+import { api, type OverviewMarket, type AiReviewReport, type SettlementStats } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { cn } from '@/lib/cn'
 import { fmtBigNum } from '@/lib/format'
@@ -25,8 +29,8 @@ import { toast } from '@/components/Toast'
 import { usePreferences } from '@/lib/useSharedQueries'
 import { useReviewState } from '@/lib/useReviewStore'
 import {
-  startReviewGeneration, resetReview, isReviewGenerating,
-  type ReviewPhase,
+  startGeneration, resetTab, isTabGenerating,
+  type ReviewTab, type ReviewPhase,
 } from '@/lib/reviewStore'
 
 // ================================================================
@@ -66,31 +70,96 @@ function fmtArchivedAt(iso: string): string {
 
 // Phase 类型复用 store 的定义(单一来源)
 
+// ================================================================
+// Tab 配置 —— 三种分析类型的文案 / 图标 / 提示
+// ================================================================
+const TAB_CONFIG: Record<ReviewTab, {
+  label: string
+  icon: React.ReactNode
+  placeholder: string
+  emptyTitle: string
+  emptyDesc: string
+  loadingText: string
+  generateText: string
+  historyLabel: string
+}> = {
+  market: {
+    label: '大盘复盘',
+    icon: <BarChart3 className="h-3.5 w-3.5" />,
+    placeholder: '可选:补充复盘关注点,如「半导体板块持续性如何」「量能是否持续」',
+    emptyTitle: 'AI 大盘复盘',
+    emptyDesc: '一键生成今日盘后复盘报告 —— 从一句话定调到明日交易计划,结构化输出可直接指导次日仓位与节奏。',
+    loadingText: 'AI 正在复盘今日盘面…',
+    generateText: '生成复盘',
+    historyLabel: '历史复盘',
+  },
+  holdings: {
+    label: '持仓分析',
+    icon: <Wallet className="h-3.5 w-3.5" />,
+    placeholder: '可选:如「医药仓位」「风险点」「仓位集中度」',
+    emptyTitle: 'AI 持仓复盘',
+    emptyDesc: '综合持仓盈亏、行业集中度、板块强弱与大盘环境,生成客观组合复盘。',
+    loadingText: 'AI 正在复盘持仓…',
+    generateText: '开始复盘',
+    historyLabel: '历史持仓复盘',
+  },
+  settlement: {
+    label: '交割单分析',
+    icon: <Receipt className="h-3.5 w-3.5" />,
+    placeholder: '可选:如「本月盈亏」「佣金占比」「某标的交易得失」',
+    emptyTitle: 'AI 交割单分析',
+    emptyDesc: '基于交割单的交易盈亏、费用回顾、月度节奏与威科夫交易行为诊断。',
+    loadingText: 'AI 正在分析交割单…',
+    generateText: '开始分析',
+    historyLabel: '历史交割单分析',
+  },
+}
+
+const VALID_TABS: ReviewTab[] = ['market', 'holdings', 'settlement']
+
 export function Review() {
   const qc = useQueryClient()
+  // ===== Tab 与 URL 同步 =====
+  const [searchParams, setSearchParams] = useSearchParams()
+  const tabParam = searchParams.get('tab') as ReviewTab | null
+  const activeTab: ReviewTab = tabParam && VALID_TABS.includes(tabParam) ? tabParam : 'market'
+  const switchTab = useCallback((tab: ReviewTab) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev)
+      next.set('tab', tab)
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
+
   // 复盘日期:当前固定取最新交易日(后续如需日期选择可改回 useState)
   const asOf: string | undefined = undefined
   const [focus, setFocus] = useState('')
   // 生成状态走全局 store:切走页面流不中断,回来可恢复
-  const { phase, content, error, meta } = useReviewState()
-  const [viewing, setViewing] = useState<AiReviewReport | null>(null)  // 查看历史报告
+  const { phase, content, error, meta } = useReviewState(activeTab)
+  const [viewing, setViewing] = useState<any | null>(null)  // 查看历史报告(各 tab 报告结构不同,用 any)
   const reportEndRef = useRef<HTMLDivElement>(null)
 
-  // 看板数据(与总览页同源)
+  // 切换 tab 时清掉 viewing(避免上一个 tab 的历史报告内容残留到新 tab 主区域)
+  useEffect(() => {
+    setViewing(null)
+  }, [activeTab])
+
+  // ===== 看板数据(market tab 专用)=====
   const marketQuery = useQuery<OverviewMarket>({
     queryKey: QK.overviewMarket(asOf),
     queryFn: () => api.overviewMarket(asOf),
     staleTime: 5_000,
     placeholderData: (prev) => prev,
+    enabled: activeTab === 'market',
   })
 
-  // 历史报告
-  const historyQuery = useQuery<{ reports: AiReviewReport[] }>({
+  // ===== 历史报告(各 tab 独立查询,按需启用)=====
+  const historyQueryMarket = useQuery<{ reports: AiReviewReport[] }>({
     queryKey: QK.reviewReports,
     queryFn: () => api.reviewReportsList(),
+    enabled: activeTab === 'market',
   })
-
-  const deleteMut = useMutation({
+  const deleteMutMarket = useMutation({
     mutationFn: (id: string) => api.reviewReportDelete(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: QK.reviewReports })
@@ -99,7 +168,60 @@ export function Review() {
     onError: () => { /* request() 已 toast */ },
   })
 
-  // ===== 定时复盘 =====
+  const historyQueryHoldings = useQuery<{ reports: any[] }>({
+    queryKey: QK.positionReports,
+    queryFn: () => api.positionReportsList(),
+    enabled: activeTab === 'holdings',
+  })
+  const deleteMutHoldings = useMutation({
+    mutationFn: (id: string) => api.positionReportDelete(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: QK.positionReports })
+      toast('已删除', 'success')
+    },
+    onError: () => { /* request() 已 toast */ },
+  })
+
+  const historyQuerySettlement = useQuery<{ reports: any[] }>({
+    queryKey: QK.settlementReports,
+    queryFn: () => api.settlementReportsList(),
+    enabled: activeTab === 'settlement',
+  })
+  const deleteMutSettlement = useMutation({
+    mutationFn: (id: string) => api.settlementReportDelete(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: QK.settlementReports })
+      toast('已删除', 'success')
+    },
+    onError: () => { /* request() 已 toast */ },
+  })
+
+  // 按 activeTab 选择当前历史数据 / 删除处理
+  const historyReports = activeTab === 'market'
+    ? (historyQueryMarket.data?.reports ?? [])
+    : activeTab === 'holdings'
+      ? (historyQueryHoldings.data?.reports ?? [])
+      : (historyQuerySettlement.data?.reports ?? [])
+  const historyLoading = activeTab === 'market'
+    ? historyQueryMarket.isLoading
+    : activeTab === 'holdings'
+      ? historyQueryHoldings.isLoading
+      : historyQuerySettlement.isLoading
+  const handleDelete = useCallback((id: string) => {
+    if (activeTab === 'market') deleteMutMarket.mutate(id)
+    else if (activeTab === 'holdings') deleteMutHoldings.mutate(id)
+    else deleteMutSettlement.mutate(id)
+  }, [activeTab, deleteMutMarket, deleteMutHoldings, deleteMutSettlement])
+
+  // ===== 刷新按钮:按 tab 刷新对应查询 =====
+  const refreshData = useCallback(() => {
+    if (activeTab === 'market') marketQuery.refetch()
+    else if (activeTab === 'holdings') qc.invalidateQueries({ queryKey: QK.positionsEnriched() })
+    else qc.invalidateQueries({ queryKey: QK.settlementStats })
+  }, [activeTab, marketQuery, qc])
+  const refreshFetching = activeTab === 'market' ? marketQuery.isFetching : false
+
+  // ===== 定时复盘(仅 market tab)=====
   const [showSchedule, setShowSchedule] = useState(false)
   const prefs = usePreferences()
   const reviewSched = prefs.data?.review_schedule ?? { enabled: false, hour: 15, minute: 10 }
@@ -156,7 +278,9 @@ export function Review() {
     }
   }, [phase, viewing])
 
-  // 自动归档(生成完成后台静默保存)—— 通过回调注入 store,避免 store 直接依赖 qc/marketQuery
+  // 自动归档(生成完成后台静默保存)—— 仅 market tab 需要,
+  // 通过回调注入 store,避免 store 直接依赖 qc/marketQuery。
+  // holdings / settlement tab 由后端自动归档,无需前端再调保存接口。
   const onGenerationDone = useCallback(async (fullContent: string, doneMeta: { as_of?: string; summary?: string; emotion_score?: number; emotion_label?: string } | null) => {
     const reportAsOf = doneMeta?.as_of ?? marketQuery.data?.as_of ?? asOf ?? new Date().toISOString().slice(0, 10)
     try {
@@ -174,13 +298,16 @@ export function Review() {
 
   // 主流程:生成复盘(委托给全局 store,流在后台独立运行)
   const generate = useCallback(() => {
-    if (isReviewGenerating()) return
+    if (isTabGenerating(activeTab)) return
     setViewing(null)
-    resetReview()
-    startReviewGeneration(asOf, focus, (full, doneMeta) => {
-      onGenerationDone(full, doneMeta).catch(() => { /* 静默 */ })
+    resetTab(activeTab)
+    startGeneration(activeTab, focus, (full, doneMeta) => {
+      // 自动归档仅 market tab 触发(holdings/settlement 由后端归档)
+      if (activeTab === 'market') {
+        onGenerationDone(full, doneMeta).catch(() => { /* 静默 */ })
+      }
     })
-  }, [asOf, focus, onGenerationDone])
+  }, [activeTab, focus, onGenerationDone])
 
   // 复制全文到剪贴板(viewing 优先,与主区域显示一致)
   const copyContent = useCallback(async () => {
@@ -210,45 +337,55 @@ export function Review() {
 
   // 查看历史报告(不中断后台生成:仅临时把 viewing 覆盖到主区域,
   // 生成中的流仍在 store 里继续跑,点"生成中"项即可切回)
-  const viewReport = useCallback((r: AiReviewReport) => {
+  const viewReport = useCallback((r: any) => {
     setViewing(r)
   }, [])
 
   const isGenerating = phase === 'loading' || phase === 'streaming'
-  const displayDate = viewing?.as_of ?? meta?.as_of ?? marketQuery.data?.as_of ?? asOf ?? '最新'
-  const data = marketQuery.data
+  const displayDate = viewing?.as_of ?? meta?.as_of ?? (activeTab === 'market' ? marketQuery.data?.as_of : undefined) ?? asOf ?? '最新'
+  const marketData = marketQuery.data
   // 主区域显示的内容:viewing(查看历史)优先于 store 的生成 content,
   // 这样点历史报告不会覆盖后台生成中的流。
   const displayContent = viewing?.content ?? content
+  const tabConfig = TAB_CONFIG[activeTab]
+
+  // market tab 的数据门控:无数据时显示引导;holdings/settlement 始终渲染主区域
+  const marketBlocked = activeTab === 'market' && (marketQuery.isLoading && !marketData || !marketData || !marketData.as_of)
 
   return (
     <>
       <PageHeader
         title="AI 复盘"
         titleExtra={<Sparkles className="h-4 w-4 text-accent" />}
-        subtitle={`${displayDate}${data?.emotion ? ` · 情绪 ${data.emotion.label}` : ''}`}
+        subtitle={
+          activeTab === 'market' && marketData?.emotion
+            ? `${displayDate} · 情绪 ${marketData.emotion.label}`
+            : displayDate
+        }
         right={
           <div className="flex items-center gap-1">
             <button
-              onClick={() => { marketQuery.refetch() }}
-              disabled={marketQuery.isFetching}
+              onClick={refreshData}
+              disabled={refreshFetching}
               className="inline-flex items-center gap-1 rounded-btn border border-border bg-elevated px-2 py-1 text-[11px] text-secondary transition-colors hover:text-foreground disabled:opacity-50"
-              title="刷新市场数据"
+              title="刷新数据"
             >
-              <RefreshCw className={cn('h-3 w-3', marketQuery.isFetching && 'animate-spin')} />刷新
+              <RefreshCw className={cn('h-3 w-3', refreshFetching && 'animate-spin')} />刷新
             </button>
-            <button
-              onClick={openSchedule}
-              className={cn(
-                'inline-flex items-center gap-1 rounded-btn border px-2 py-1 text-[11px] transition-colors',
-                reviewSched.enabled
-                  ? 'border-accent/40 bg-accent/10 text-accent hover:bg-accent/20'
-                  : 'border-border bg-elevated text-secondary hover:text-foreground',
-              )}
-              title={reviewSched.enabled ? `定时复盘已开启 · 每日 ${String(reviewSched.hour).padStart(2,'0')}:${String(reviewSched.minute).padStart(2,'0')}` : '定时复盘'}
-            >
-              <Clock className="h-3 w-3" />定时
-            </button>
+            {activeTab === 'market' && (
+              <button
+                onClick={openSchedule}
+                className={cn(
+                  'inline-flex items-center gap-1 rounded-btn border px-2 py-1 text-[11px] transition-colors',
+                  reviewSched.enabled
+                    ? 'border-accent/40 bg-accent/10 text-accent hover:bg-accent/20'
+                    : 'border-border bg-elevated text-secondary hover:text-foreground',
+                )}
+                title={reviewSched.enabled ? `定时复盘已开启 · 每日 ${String(reviewSched.hour).padStart(2,'0')}:${String(reviewSched.minute).padStart(2,'0')}` : '定时复盘'}
+              >
+                <Clock className="h-3 w-3" />定时
+              </button>
+            )}
             <button
               onClick={generate}
               disabled={isGenerating}
@@ -262,7 +399,7 @@ export function Review() {
               {isGenerating ? (
                 <><RefreshCw className="h-3.5 w-3.5 animate-spin" />生成中…</>
               ) : (
-                <><Sparkles className="h-3.5 w-3.5" />生成复盘</>
+                <><Sparkles className="h-3.5 w-3.5" />{tabConfig.generateText}</>
               )}
             </button>
           </div>
@@ -272,35 +409,58 @@ export function Review() {
       <div className="min-h-full bg-[radial-gradient(circle_at_15%_-5%,rgba(59,130,246,0.10),transparent_30%),radial-gradient(circle_at_85%_5%,rgba(139,92,246,0.08),transparent_30%)] px-4 py-4 sm:px-6">
         <div className="mx-auto max-w-[1280px] space-y-3">
 
-          {marketQuery.isLoading && !data ? (
-            <div className="flex h-40 items-center justify-center">
-              <div className="flex items-center gap-2 text-sm text-muted">
-                <RefreshCw className="h-4 w-4 animate-spin" /> 加载市场数据…
-              </div>
-            </div>
-          ) : !data || !data.as_of ? (
-            <div className="flex flex-col items-center justify-center gap-4 rounded-card border border-border bg-surface/80 px-6 py-16">
-              <div className="relative">
-                <div className="grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-accent/20 to-purple-500/15 border border-accent/30">
-                  <Database className="h-6 w-6 text-accent" strokeWidth={1.8} />
+          {/* ===== Tab 切换条 ===== */}
+          <div className="flex items-center gap-1 rounded-card border border-border bg-surface/80 p-1">
+            {(Object.keys(TAB_CONFIG) as ReviewTab[]).map(tab => (
+              <button
+                key={tab}
+                onClick={() => switchTab(tab)}
+                className={cn(
+                  'inline-flex items-center gap-1.5 rounded-btn px-3 py-1.5 text-xs font-medium transition-colors',
+                  activeTab === tab
+                    ? 'bg-accent/15 text-accent'
+                    : 'text-secondary hover:text-foreground hover:bg-elevated/60',
+                )}
+              >
+                {TAB_CONFIG[tab].icon}
+                {TAB_CONFIG[tab].label}
+              </button>
+            ))}
+          </div>
+
+          {marketBlocked ? (
+            activeTab === 'market' && marketQuery.isLoading && !marketData ? (
+              <div className="flex h-40 items-center justify-center">
+                <div className="flex items-center gap-2 text-sm text-muted">
+                  <RefreshCw className="h-4 w-4 animate-spin" /> 加载市场数据…
                 </div>
               </div>
-              <div className="text-center">
-                <div className="text-sm font-medium text-foreground">暂无市场数据</div>
-                <p className="mt-1 text-xs text-muted">复盘需要日 K 与指数,请先前往「数据」页同步</p>
+            ) : (
+              <div className="flex flex-col items-center justify-center gap-4 rounded-card border border-border bg-surface/80 px-6 py-16">
+                <div className="relative">
+                  <div className="grid h-14 w-14 place-items-center rounded-2xl bg-gradient-to-br from-accent/20 to-purple-500/15 border border-accent/30">
+                    <Database className="h-6 w-6 text-accent" strokeWidth={1.8} />
+                  </div>
+                </div>
+                <div className="text-center">
+                  <div className="text-sm font-medium text-foreground">暂无市场数据</div>
+                  <p className="mt-1 text-xs text-muted">复盘需要日 K 与指数,请先前往「数据」页同步</p>
+                </div>
+                <Link
+                  to="/data"
+                  className="inline-flex items-center gap-1.5 rounded-btn bg-accent px-4 py-2 text-xs font-medium text-white shadow-sm transition-all hover:bg-accent/90 hover:shadow"
+                >
+                  <Database className="h-3.5 w-3.5" />前往数据页同步
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </Link>
               </div>
-              <Link
-                to="/data"
-                className="inline-flex items-center gap-1.5 rounded-btn bg-accent px-4 py-2 text-xs font-medium text-white shadow-sm transition-all hover:bg-accent/90 hover:shadow"
-              >
-                <Database className="h-3.5 w-3.5" />前往数据页同步
-                <ChevronRight className="h-3.5 w-3.5" />
-              </Link>
-            </div>
+            )
           ) : (
             <>
-              {/* ===== 市场摘要条(轻量上下文,非重复看板)===== */}
-              <MarketSummaryBar data={data} />
+              {/* ===== 摘要条(各 tab 不同)===== */}
+              {activeTab === 'market' && marketData && <MarketSummaryBar data={marketData} />}
+              {activeTab === 'holdings' && <HoldingsSummaryBar />}
+              {activeTab === 'settlement' && <SettlementSummaryBar />}
 
               {/* ===== 关注点输入 ===== */}
               <div className="flex items-center gap-2 rounded-card border border-border bg-surface/80 px-3.5 py-2.5 transition-colors focus-within:border-accent/40">
@@ -309,7 +469,7 @@ export function Review() {
                   value={focus}
                   onChange={(e) => setFocus(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter' && !isGenerating) generate() }}
-                  placeholder="可选:补充复盘关注点,如「半导体板块持续性如何」「量能是否持续」"
+                  placeholder={tabConfig.placeholder}
                   className="flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted/60"
                 />
                 {focus && (
@@ -320,6 +480,8 @@ export function Review() {
               {/* ===== 报告 + 历史 双栏(报告为主体)===== */}
               <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr_18rem]">
                 <ReportPanel
+                  tab={activeTab}
+                  tabConfig={tabConfig}
                   phase={phase}
                   content={displayContent}
                   error={error}
@@ -331,13 +493,14 @@ export function Review() {
                   reportEndRef={reportEndRef}
                 />
                 <HistoryPanel
-                  reports={historyQuery.data?.reports ?? []}
-                  loading={historyQuery.isLoading}
+                  tab={activeTab}
+                  reports={historyReports}
+                  loading={historyLoading}
                   viewingId={viewing?.id ?? null}
                   generating={isGenerating}
                   onView={viewReport}
                   onBackToGenerating={() => setViewing(null)}
-                  onDelete={(id) => deleteMut.mutate(id)}
+                  onDelete={handleDelete}
                 />
               </div>
             </>
@@ -345,7 +508,7 @@ export function Review() {
         </div>
       </div>
 
-      {/* ===== 定时复盘设置弹窗 ===== */}
+      {/* ===== 定时复盘设置弹窗(仅 market tab 使用)===== */}
       <AnimatePresence>
         {showSchedule && (
           <motion.div
@@ -600,16 +763,116 @@ function MarketSummaryBar({ data }: { data: OverviewMarket }) {
 }
 
 // ================================================================
+// 持仓摘要条 —— holdings tab 的轻量上下文
+// 汇总持仓数量、总市值、浮盈亏(从 positionsEnriched 聚合)
+// ================================================================
+function HoldingsSummaryBar() {
+  const { data, isLoading } = useQuery({
+    queryKey: QK.positionsEnriched(),
+    queryFn: () => api.positionsEnriched(),
+  })
+
+  const rows = data?.rows ?? []
+  let mv = 0
+  let pnl = 0
+  const count = rows.length
+  for (const r of rows) {
+    const price = Number(r.close)
+    const shares = Number(r.shares) || 0
+    const costPrice = Number(r.cost_price) || 0
+    if (Number.isFinite(price) && price > 0) {
+      mv += price * shares
+      if (costPrice > 0) pnl += (price - costPrice) * shares
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-card border border-border bg-surface/80 px-4 py-2.5">
+      <div className="flex items-center gap-2">
+        <span className="grid h-8 w-8 place-items-center rounded bg-accent/15 text-accent">
+          <Wallet className="h-4 w-4" />
+        </span>
+        <div className="leading-tight">
+          <div className="text-[11px] font-medium text-foreground">
+            {isLoading ? '…' : `${count} 只持仓`}
+          </div>
+          <div className="text-[9px] text-secondary">持仓概览</div>
+        </div>
+      </div>
+      <div className="hidden h-7 w-px bg-border sm:block" />
+      <div className="flex items-center gap-1.5 text-[11px]">
+        <span className="text-secondary">总市值</span>
+        <span className="font-mono font-semibold text-foreground">{fmtBigNum(mv)}</span>
+      </div>
+      <div className="flex items-center gap-1.5 text-[11px]">
+        <span className="text-secondary">浮盈亏</span>
+        <span className={cn('font-mono font-semibold', pnl > 0 ? 'text-bull' : pnl < 0 ? 'text-bear' : 'text-muted')}>
+          {pnl >= 0 ? '+' : ''}{fmtBigNum(Math.abs(pnl))}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+// ================================================================
+// 交割单摘要条 —— settlement tab 的轻量上下文
+// 展示记录数、买入/卖出笔数、已实现盈亏、费用
+// ================================================================
+function SettlementSummaryBar() {
+  const { data, isLoading } = useQuery<SettlementStats>({
+    queryKey: QK.settlementStats,
+    queryFn: () => api.settlementStats(),
+  })
+  const s = data?.summary
+  const realized = data?.realized_pnl_curve?.at(-1)?.cumulative ?? 0
+
+  return (
+    <div className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-card border border-border bg-surface/80 px-4 py-2.5">
+      <div className="flex items-center gap-2">
+        <span className="grid h-8 w-8 place-items-center rounded bg-accent/15 text-accent">
+          <Receipt className="h-4 w-4" />
+        </span>
+        <div className="leading-tight">
+          <div className="text-[11px] font-medium text-foreground">
+            {isLoading ? '…' : `${data?.records_count ?? 0} 条记录`}
+          </div>
+          <div className="text-[9px] text-secondary">交割单概览</div>
+        </div>
+      </div>
+      <div className="hidden h-7 w-px bg-border sm:block" />
+      <div className="flex items-center gap-1.5 text-[11px]">
+        <span className="text-secondary">买入</span>
+        <span className="font-mono font-semibold text-bull">{s?.buy_count ?? 0}</span>
+        <span className="text-secondary ml-2">卖出</span>
+        <span className="font-mono font-semibold text-bear">{s?.sell_count ?? 0}</span>
+      </div>
+      <div className="flex items-center gap-1.5 text-[11px]">
+        <span className="text-secondary">已实现盈亏</span>
+        <span className={cn('font-mono font-semibold', realized > 0 ? 'text-bull' : realized < 0 ? 'text-bear' : 'text-muted')}>
+          {realized >= 0 ? '+' : ''}{fmtBigNum(Math.abs(realized))}
+        </span>
+      </div>
+      <div className="flex items-center gap-1.5 text-[11px]">
+        <span className="text-secondary">费用</span>
+        <span className="font-mono font-semibold text-muted">{fmtBigNum(s?.total_fees ?? 0)}</span>
+      </div>
+    </div>
+  )
+}
+
+// ================================================================
 // 报告面板(流式 + 错误 + 历史/完成态)
 // ================================================================
 function ReportPanel({
-  phase, content, error, isGenerating, viewing, onCopy, onDownload, onRegenerate, reportEndRef,
+  tab, tabConfig, phase, content, error, isGenerating, viewing, onCopy, onDownload, onRegenerate, reportEndRef,
 }: {
+  tab: ReviewTab
+  tabConfig: typeof TAB_CONFIG[ReviewTab]
   phase: ReviewPhase
   content: string
   error: string
   isGenerating: boolean
-  viewing: AiReviewReport | null
+  viewing: any | null
   onCopy: () => void
   onDownload: () => void
   onRegenerate: () => void
@@ -643,32 +906,33 @@ function ReportPanel({
           <Sparkles className="absolute -right-1 -top-1 h-5 w-5 text-accent" />
         </div>
         <div className="text-center">
-          <div className="text-base font-semibold text-foreground">AI 大盘复盘</div>
+          <div className="text-base font-semibold text-foreground">{tabConfig.emptyTitle}</div>
           <p className="mx-auto mt-2 max-w-sm text-xs leading-relaxed text-secondary">
-            一键生成今日盘后复盘报告 —— 从一句话定调到明日交易计划,
-            结构化输出可直接指导次日仓位与节奏。
+            {tabConfig.emptyDesc}
           </p>
         </div>
-        {/* 报告七节预览 —— 空状态也有内容感,暗示报告结构 */}
-        <div className="mt-2 grid w-full max-w-md grid-cols-2 gap-2 sm:grid-cols-4">
-          {[
-            { icon: '🎯', label: '一句话定调' },
-            { icon: '📊', label: '盘面总览' },
-            { icon: '🔥', label: '板块主线' },
-            { icon: '💰', label: '资金情绪' },
-            { icon: '📰', label: '消息催化' },
-            { icon: '🎯', label: '明日计划' },
-            { icon: '⚠️', label: '风险提示' },
-          ].map((s) => (
-            <div key={s.label} className="flex flex-col items-center gap-1 rounded-btn bg-elevated/40 px-2 py-2">
-              <span className="text-base">{s.icon}</span>
-              <span className="text-[10px] text-secondary">{s.label}</span>
-            </div>
-          ))}
-        </div>
+        {/* 报告七节预览 —— 仅 market tab 显示,空状态也有内容感,暗示报告结构 */}
+        {tab === 'market' && (
+          <div className="mt-2 grid w-full max-w-md grid-cols-2 gap-2 sm:grid-cols-4">
+            {[
+              { icon: '🎯', label: '一句话定调' },
+              { icon: '📊', label: '盘面总览' },
+              { icon: '🔥', label: '板块主线' },
+              { icon: '💰', label: '资金情绪' },
+              { icon: '📰', label: '消息催化' },
+              { icon: '🎯', label: '明日计划' },
+              { icon: '⚠️', label: '风险提示' },
+            ].map((s) => (
+              <div key={s.label} className="flex flex-col items-center gap-1 rounded-btn bg-elevated/40 px-2 py-2">
+                <span className="text-base">{s.icon}</span>
+                <span className="text-[10px] text-secondary">{s.label}</span>
+              </div>
+            ))}
+          </div>
+        )}
         <div className="mt-2 flex items-center gap-1.5 text-[11px] text-muted">
           <Sparkles className="h-3 w-3 text-accent" />
-          点击右上角「生成复盘」开始
+          点击右上角「{tabConfig.generateText}」开始
         </div>
       </div>
     )
@@ -691,7 +955,7 @@ function ReportPanel({
         <div className="flex items-center gap-1.5">
           {isGenerating ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-accent" /> : <BookOpenCheck className="h-3.5 w-3.5 text-accent" />}
           <span className="text-xs font-medium text-foreground">
-            {showViewingTag ? `历史复盘 · ${viewing!.as_of}` : isGenerating ? 'AI 正在复盘…' : '复盘报告'}
+            {showViewingTag ? `历史 · ${viewing!.as_of}` : isGenerating ? tabConfig.loadingText : '报告'}
           </span>
         </div>
         {showActions && (
@@ -714,7 +978,7 @@ function ReportPanel({
               </div>
               <RefreshCw className="absolute -inset-1 h-13 w-13 animate-spin text-accent/30" style={{ animationDuration: '3s' }} />
             </div>
-            <div className="text-sm text-foreground">AI 正在复盘今日盘面…</div>
+            <div className="text-sm text-foreground">{tabConfig.loadingText}</div>
             <div className="text-xs text-secondary">分析指数结构 · 连板梯队 · 板块轮动 · 资金情绪</div>
           </div>
         ) : (
@@ -732,25 +996,30 @@ function ReportPanel({
 }
 
 // ================================================================
-// 历史面板
+// 历史面板 —— 按 tab 渲染不同结构的报告条目
+//  - market:     情绪分徽章 + 情绪标签 + 指数涨跌 summary
+//  - holdings:   持仓数徽章 + 总市值/浮盈亏
+//  - settlement: 记录数徽章 + 交易笔数/已实现盈亏
 // ================================================================
 function HistoryPanel({
-  reports, loading, viewingId, generating, onView, onBackToGenerating, onDelete,
+  tab, reports, loading, viewingId, generating, onView, onBackToGenerating, onDelete,
 }: {
-  reports: AiReviewReport[]
+  tab: ReviewTab
+  reports: any[]
   loading: boolean
   viewingId: string | null
   generating: boolean
-  onView: (r: AiReviewReport) => void
+  onView: (r: any) => void
   onBackToGenerating: () => void
   onDelete: (id: string) => void
 }) {
+  const tabConfig = TAB_CONFIG[tab]
   const empty = !generating && reports.length === 0
   return (
     <div className="overflow-hidden rounded-card border border-border bg-surface/80">
       <div className="flex items-center gap-1.5 border-b border-border bg-gradient-to-r from-accent/5 to-transparent px-3 py-2.5">
         <History className="h-3.5 w-3.5 text-accent" />
-        <span className="text-xs font-medium text-foreground">历史复盘</span>
+        <span className="text-xs font-medium text-foreground">{tabConfig.historyLabel}</span>
         <span className="font-mono text-[10px] text-muted">({reports.length})</span>
       </div>
       <div className="max-h-[calc(100vh-26rem)] overflow-y-auto p-2">
@@ -759,7 +1028,7 @@ function HistoryPanel({
         ) : empty ? (
           <div className="flex flex-col items-center justify-center gap-2 px-3 py-10 text-center">
             <History className="h-7 w-7 text-muted/40" strokeWidth={1.5} />
-            <div className="text-[11px] text-muted">暂无历史复盘</div>
+            <div className="text-[11px] text-muted">暂无{tabConfig.historyLabel}</div>
             <div className="text-[10px] text-muted/60">生成完成后自动归档</div>
           </div>
         ) : (
@@ -778,12 +1047,117 @@ function HistoryPanel({
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-[11px] font-medium text-accent">生成中…</div>
-                  <div className="mt-0.5 truncate text-[10px] text-secondary">AI 正在复盘今日盘面</div>
+                  <div className="mt-0.5 truncate text-[10px] text-secondary">{tabConfig.loadingText}</div>
                 </div>
               </div>
             )}
             {reports.map((r) => {
-              const color = scoreColor(r.emotion_score)
+              // 各 tab 徽章 / 副信息不同
+              let badge: React.ReactNode = null
+              let primary: React.ReactNode = null
+              let secondary: React.ReactNode = null
+
+              if (tab === 'market') {
+                const color = scoreColor(r.emotion_score)
+                badge = (
+                  <div
+                    className="grid h-8 w-8 shrink-0 place-items-center rounded font-mono text-[10px] font-bold tabular-nums"
+                    style={{ color, backgroundColor: `${color}1a` }}
+                  >
+                    {r.emotion_score ?? '—'}
+                  </div>
+                )
+                primary = (
+                  <>
+                    <span className="truncate text-[11px] font-medium text-foreground">{r.emotion_label ?? '—'}</span>
+                    <span className="font-mono text-[10px] text-secondary">{r.as_of}</span>
+                  </>
+                )
+                secondary = r.summary
+                  ? (() => {
+                      const pcts = parseIndexPcts(shortenIndexNames(r.summary).split('|')[0])
+                      if (pcts.length === 0) {
+                        return <span className="truncate text-[10px] text-secondary">{r.content.slice(0, 40)}</span>
+                      }
+                      return (
+                        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                          {pcts.map((p) => (
+                            <span key={p.name} className="inline-flex items-center gap-0.5 text-[10px]">
+                              <span className="text-secondary">{p.name}</span>
+                              <span className={cn('font-mono font-medium tabular-nums', pctClass(p.pctNum))}>{p.pctStr}</span>
+                            </span>
+                          ))}
+                        </div>
+                      )
+                    })()
+                  : <span className="truncate text-[10px] text-secondary">{r.content.slice(0, 40)}</span>
+              } else if (tab === 'holdings') {
+                const countVal = r.summary?.count ?? r.count ?? 0
+                const totalMv = r.summary?.total_market_value
+                const pnlPct = r.summary?.total_pnl_pct
+                badge = (
+                  <div className="grid h-8 w-8 shrink-0 place-items-center rounded bg-accent/15 font-mono text-[10px] font-bold tabular-nums text-accent">
+                    {countVal}
+                  </div>
+                )
+                primary = (
+                  <>
+                    <span className="truncate text-[11px] font-medium text-foreground">{r.as_of}</span>
+                    <span className="text-[10px] text-secondary">持仓复盘</span>
+                  </>
+                )
+                secondary = (
+                  <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                    {totalMv != null && (
+                      <span className="inline-flex items-center gap-0.5 text-[10px]">
+                        <span className="text-secondary">市值</span>
+                        <span className="font-mono font-medium text-foreground">{fmtBigNum(totalMv)}</span>
+                      </span>
+                    )}
+                    {pnlPct != null && (
+                      <span className="inline-flex items-center gap-0.5 text-[10px]">
+                        <span className="text-secondary">盈亏</span>
+                        <span className={cn('font-mono font-medium tabular-nums', pctClass(pnlPct))}>{fmtPctAlready(pnlPct, 2, true)}</span>
+                      </span>
+                    )}
+                  </div>
+                )
+              } else {
+                // settlement
+                const recordsCount = r.summary?.records_count ?? r.count ?? 0
+                const totalTrades = r.summary?.total_trades ?? 0
+                const realized = r.summary?.total_realized_pnl
+                badge = (
+                  <div className="grid h-8 w-8 shrink-0 place-items-center rounded bg-accent/15 font-mono text-[10px] font-bold tabular-nums text-accent">
+                    {recordsCount}
+                  </div>
+                )
+                primary = (
+                  <>
+                    <span className="truncate text-[11px] font-medium text-foreground">{r.as_of}</span>
+                    <span className="text-[10px] text-secondary">交割单分析</span>
+                  </>
+                )
+                secondary = (
+                  <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                    {totalTrades != null && totalTrades > 0 && (
+                      <span className="inline-flex items-center gap-0.5 text-[10px]">
+                        <span className="text-secondary">交易</span>
+                        <span className="font-mono font-medium text-foreground">{totalTrades}</span>
+                      </span>
+                    )}
+                    {realized != null && (
+                      <span className="inline-flex items-center gap-0.5 text-[10px]">
+                        <span className="text-secondary">盈亏</span>
+                        <span className={cn('font-mono font-medium tabular-nums', realized > 0 ? 'text-bull' : realized < 0 ? 'text-bear' : 'text-muted')}>
+                          {realized >= 0 ? '+' : ''}{fmtBigNum(Math.abs(realized))}
+                        </span>
+                      </span>
+                    )}
+                  </div>
+                )
+              }
+
               return (
                 <div
                   key={r.id}
@@ -793,33 +1167,10 @@ function HistoryPanel({
                   )}
                   onClick={() => onView(r)}
                 >
-                  <div
-                    className="grid h-8 w-8 shrink-0 place-items-center rounded font-mono text-[10px] font-bold tabular-nums"
-                    style={{ color, backgroundColor: `${color}1a` }}
-                  >
-                    {r.emotion_score ?? '—'}
-                  </div>
+                  {badge}
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <span className="truncate text-[11px] font-medium text-foreground">{r.emotion_label ?? '—'}</span>
-                      <span className="font-mono text-[10px] text-secondary">{r.as_of}</span>
-                    </div>
-                    <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                      {r.summary
-                        ? (() => {
-                            const pcts = parseIndexPcts(shortenIndexNames(r.summary).split('|')[0])
-                            if (pcts.length === 0) {
-                              return <span className="truncate text-[10px] text-secondary">{r.content.slice(0, 40)}</span>
-                            }
-                            return pcts.map((p) => (
-                              <span key={p.name} className="inline-flex items-center gap-0.5 text-[10px]">
-                                <span className="text-secondary">{p.name}</span>
-                                <span className={cn('font-mono font-medium tabular-nums', pctClass(p.pctNum))}>{p.pctStr}</span>
-                              </span>
-                            ))
-                          })()
-                        : <span className="truncate text-[10px] text-secondary">{r.content.slice(0, 40)}</span>}
-                    </div>
+                    <div className="flex items-center gap-1.5">{primary}</div>
+                    <div className="mt-0.5">{secondary}</div>
                     {r.created_at && (
                       <div className="mt-0.5 font-mono text-[9px] text-muted">{fmtArchivedAt(r.created_at)}</div>
                     )}
