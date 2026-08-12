@@ -655,6 +655,9 @@ export interface AiReviewReport {
   skill_params?: Record<string, any> | null
   // 生成时使用的 AI 模型(null = 老报告无记录)
   model?: string | null
+  // Token 用量与耗时(null = 老报告无记录)
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null
+  duration_ms?: number | null
 }
 
 // ===== Strategy Engine =====
@@ -680,6 +683,7 @@ export interface SkillParamDef {
   min?: number
   max?: number
   step?: number
+  description?: string
 }
 
 export interface SkillMeta {
@@ -2416,6 +2420,8 @@ export const api = {
     summary?: string; emotion_score?: number | null; emotion_label?: string
     skill_id?: string | null; skill_name?: string | null; skill_params?: Record<string, any> | null
     model?: string | null
+    usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null
+    duration_ms?: number | null
   }) =>
     request<{ ok: boolean; report: AiReviewReport }>('/api/market-recap/reports', {
       method: 'POST', body: JSON.stringify(r),

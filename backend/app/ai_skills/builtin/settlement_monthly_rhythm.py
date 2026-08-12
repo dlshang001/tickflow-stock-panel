@@ -21,12 +21,14 @@ META: dict[str, Any] = {
             "label": "包含季节性分析",
             "type": "bool",
             "default": True,
+            "description": "是否包含季节性/月度节奏分析",
         },
         {
             "key": "show_weekly_distribution",
             "label": "显示周度分布",
             "type": "bool",
             "default": False,
+            "description": "是否展示每周交易分布",
         },
     ],
 }

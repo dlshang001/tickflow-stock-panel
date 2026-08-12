@@ -29,7 +29,7 @@ import { toast } from '@/components/Toast'
 import { usePreferences } from '@/lib/useSharedQueries'
 import { useReviewState } from '@/lib/useReviewStore'
 import {
-  startGeneration, resetTab, isTabGenerating,
+  startGeneration, abortGeneration, resetTab, isTabGenerating,
   type ReviewTab, type ReviewPhase, type ReviewMeta,
 } from '@/lib/reviewStore'
 import { getSkillState } from '@/lib/aiSkillStore'
@@ -156,6 +156,8 @@ export function Review() {
         skill_id: viewing.skill_id ?? meta?.skill_id ?? null,
         skill_name: viewing.skill_name ?? meta?.skill_name ?? null,
         skill_params: viewing.skill_params ?? meta?.skill_params ?? {},
+        usage: viewing.usage ?? meta?.usage ?? null,
+        duration_ms: viewing.duration_ms ?? meta?.duration_ms ?? null,
       }
     : meta
 
@@ -353,6 +355,8 @@ export function Review() {
         skill_name: doneMeta?.skill_name ?? null,
         skill_params: doneMeta?.skill_params ?? null,
         model: doneMeta?.model ?? null,
+        usage: doneMeta?.usage ?? null,
+        duration_ms: doneMeta?.duration_ms ?? null,
       })
       qc.invalidateQueries({ queryKey: QK.reviewReports })
     } catch { /* 静默 */ }
@@ -468,6 +472,15 @@ export function Review() {
                 <><Sparkles className="h-3.5 w-3.5" />{tabConfig.generateText}</>
               )}
             </button>
+            {isGenerating && (
+              <button
+                onClick={() => abortGeneration(activeTab)}
+                className="inline-flex items-center gap-1.5 rounded-btn border border-border bg-elevated px-3 py-1.5 text-xs font-medium text-secondary transition-colors hover:bg-danger/10 hover:text-danger"
+                title="停止当前生成(保留已生成内容)"
+              >
+                <X className="h-3.5 w-3.5" />停止
+              </button>
+            )}
           </div>
         }
       />
@@ -565,6 +578,7 @@ export function Review() {
                   error={error}
                   isGenerating={isGenerating}
                   viewing={viewing}
+                  stats={displayMeta}
                   onCopy={copyContent}
                   onDownload={downloadContent}
                   onRegenerate={generate}
@@ -966,7 +980,7 @@ function SettlementSummaryBar() {
 // 报告面板(流式 + 错误 + 历史/完成态)
 // ================================================================
 function ReportPanel({
-  tab, tabConfig, phase, content, error, isGenerating, viewing, onCopy, onDownload, onRegenerate, reportEndRef,
+  tab, tabConfig, phase, content, error, isGenerating, viewing, stats, onCopy, onDownload, onRegenerate, reportEndRef,
 }: {
   tab: ReviewTab
   tabConfig: typeof TAB_CONFIG[ReviewTab]
@@ -975,6 +989,7 @@ function ReportPanel({
   error: string
   isGenerating: boolean
   viewing: any | null
+  stats: any | null
   onCopy: () => void
   onDownload: () => void
   onRegenerate: () => void
@@ -1093,6 +1108,18 @@ function ReportPanel({
         )}
         <div ref={reportEndRef} />
       </div>
+      {stats && (stats.duration_ms != null || stats.usage?.total_tokens) && (
+        <div className="flex items-center gap-3 border-t border-border px-5 py-2 text-xs text-muted">
+          {stats.duration_ms != null && (
+            <span className="inline-flex items-center gap-1">
+              <Clock className="h-3 w-3" />耗时 {(stats.duration_ms / 1000).toFixed(1)}s
+            </span>
+          )}
+          {stats.usage?.total_tokens != null && stats.usage.total_tokens > 0 && (
+            <span>约 {stats.usage.total_tokens.toLocaleString()} tokens</span>
+          )}
+        </div>
+      )}
     </motion.div>
   )
 }

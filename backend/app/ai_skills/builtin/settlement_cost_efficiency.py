@@ -21,12 +21,16 @@ META: dict[str, Any] = {
             "label": "费用预警阈值",
             "type": "float",
             "default": 0.03,
+            "description": "费率预警阈值(单笔费用占比超此值给出提示, 用小数如 0.03 表示 3%)",
+            "min": 0,
+            "max": 1,
         },
         {
             "key": "show_top_cost_drivers",
             "label": "显示费用 Top 驱动",
             "type": "bool",
             "default": True,
+            "description": "是否展示费用主因 Top 榜",
         },
     ],
 }

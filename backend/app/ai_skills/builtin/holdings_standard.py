@@ -19,16 +19,13 @@ META: dict[str, Any] = {
     "default_for_category": True,
     "params": [
         {
-            "key": "include_risk_warnings",
-            "label": "包含风险提示",
-            "type": "bool",
-            "default": True,
-        },
-        {
             "key": "max_holdings_detail",
             "label": "逐只明细上限",
             "type": "int",
             "default": 10,
+            "description": "单只持仓明细展示数量上限",
+            "min": 1,
+            "max": 30,
         },
     ],
 }

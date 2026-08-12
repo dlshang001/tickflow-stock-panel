@@ -46,7 +46,12 @@ export function SkillParamsPanel({ tab }: Props) {
           const value = state.params[pid]
           return (
             <div key={pid} className="flex items-center justify-between gap-2">
-              <label className="text-xs text-secondary">{param.label}</label>
+              <label
+                className="text-xs text-secondary"
+                title={param.description ?? param.label}
+              >
+                {param.label}
+              </label>
               <ParamControl
                 param={param}
                 value={value}

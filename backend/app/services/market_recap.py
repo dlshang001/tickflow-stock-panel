@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import date
 from typing import AsyncIterator
 
+from app.services.ai_provider import CancelCheck
 from app.services.market_overview_builder import build_market_overview
 
 logger = logging.getLogger(__name__)
@@ -266,6 +268,8 @@ async def recap_market_stream(
     news: list[dict] | None = None,
     skill_id: str | None = None,
     skill_params: dict | None = None,
+    usage_info: dict | None = None,
+    cancel_check: CancelCheck = None,
 ) -> AsyncIterator[str]:
     """流式大盘复盘:yield 出每个 NDJSON 事件。
 
@@ -279,6 +283,7 @@ async def recap_market_stream(
     # 1. 装配市场总览
     overview = build_market_overview(repo, quote_service, depth_service, as_of)
     as_of_str = overview.get("as_of")
+    _t_start = time.monotonic()
 
     if not as_of_str:
         yield json.dumps({
@@ -354,7 +359,12 @@ async def recap_market_stream(
             ],
             temperature=0.5,
             max_tokens=4500,
+            usage_info=usage_info,
+            cancel_check=cancel_check,
         ):
+            if cancel_check is not None and await cancel_check():
+                logger.info("market_recap: llm cancelled by client")
+                break
             yield json.dumps({"type": "delta", "content": delta}, ensure_ascii=False)
 
     except Exception as e:  # noqa: BLE001
@@ -362,7 +372,11 @@ async def recap_market_stream(
         yield json.dumps({"type": "error", "message": f"AI 复盘失败: {e}"}, ensure_ascii=False)
         return
 
-    yield json.dumps({"type": "done"}, ensure_ascii=False)
+    yield json.dumps({
+        "type": "done",
+        "usage": usage_info or {},
+        "duration_ms": int((time.monotonic() - _t_start) * 1000),
+    }, ensure_ascii=False)
 
 
 async def recap_market_once(
@@ -374,17 +388,19 @@ async def recap_market_once(
     news: list[dict] | None = None,
     skill_id: str | None = None,
     skill_params: dict | None = None,
+    usage_info: dict | None = None,
 ) -> tuple[str | None, dict]:
     """非流式版本(供定时任务调用):累积全部 delta,返回 (content, meta)。
 
     content 为完整 Markdown 文本;失败时为 None。
-    meta 含 as_of / emotion_score / emotion_label / summary(即使失败也尽量回填)。
+    meta 含 as_of / emotion_score / emotion_label / summary(即使失败也尽量回填), 且含 usage / duration_ms。
     """
     content_parts: list[str] = []
     meta: dict = {"as_of": as_of.isoformat() if as_of else None}
     async for evt in recap_market_stream(
         repo, quote_service, depth_service, as_of, focus, news,
         skill_id=skill_id, skill_params=skill_params,
+        usage_info=usage_info,
     ):
         try:
             obj = json.loads(evt)
@@ -395,6 +411,8 @@ async def recap_market_once(
             meta = obj
         elif t == "delta":
             content_parts.append(obj.get("content", ""))
+        elif t == "done":
+            meta = {**meta, "usage": obj.get("usage") or {}, "duration_ms": obj.get("duration_ms")}
         elif t == "error":
             logger.warning("market recap error event: %s", obj.get("message"))
             return None, meta

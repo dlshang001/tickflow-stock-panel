@@ -18,10 +18,13 @@ import json
 import logging
 import math
 import re
+import time
 from datetime import date, timedelta
 from typing import AsyncIterator
 
 import polars as pl
+
+from app.services.ai_provider import CancelCheck
 
 from app.indicators.levels import compute_levels
 
@@ -713,6 +716,8 @@ async def analyze_positions_stream(
     focus: str = "",
     skill_id: str | None = None,
     skill_params: dict | None = None,
+    usage_info: dict | None = None,
+    cancel_check: CancelCheck = None,
 ) -> AsyncIterator[str]:
     """流式持仓复盘:yield 出每个 NDJSON 事件。
 
@@ -726,6 +731,7 @@ async def analyze_positions_stream(
         yield json.dumps({"type": "error", "message": "当前没有持仓,无法复盘"}, ensure_ascii=False)
         return
 
+    _t_start = time.monotonic()
     logger.info(
         "position_analyze: start, positions=%d, focus=%s",
         len(positions_rows), focus[:60] if focus else "(none)",
@@ -897,7 +903,12 @@ async def analyze_positions_stream(
             ],
             temperature=0.5,
             max_tokens=4000,
+            usage_info=usage_info,
+            cancel_check=cancel_check,
         ):
+            if cancel_check is not None and await cancel_check():
+                logger.info("position_analyze: llm cancelled by client, chunks=%d", chunk_count)
+                break
             chunk_count += 1
             yield json.dumps({"type": "delta", "content": delta}, ensure_ascii=False)
         logger.info("position_analyze: llm done, chunks=%d", chunk_count)
@@ -906,7 +917,11 @@ async def analyze_positions_stream(
         yield json.dumps({"type": "error", "message": f"AI 复盘失败: {e}"}, ensure_ascii=False)
         return
 
-    yield json.dumps({"type": "done"}, ensure_ascii=False)
+    yield json.dumps({
+        "type": "done",
+        "usage": usage_info or {},
+        "duration_ms": int((time.monotonic() - _t_start) * 1000),
+    }, ensure_ascii=False)
     logger.info("position_analyze: done")
 
 
@@ -917,17 +932,19 @@ async def analyze_positions_once(
     focus: str = "",
     skill_id: str | None = None,
     skill_params: dict | None = None,
+    usage_info: dict | None = None,
 ) -> tuple[str | None, dict]:
     """非流式持仓复盘 —— 供定时任务/推送等只需最终文本的调用方。
 
     返回 (content, meta):content 为完整 Markdown,失败为 None;
-    meta 含 count/summary/concentration/as_of。
+    meta 含 count/summary/concentration/as_of, 且含 usage / duration_ms。
     """
     content_parts: list[str] = []
     meta: dict = {}
     async for chunk in analyze_positions_stream(
         repo, quote_service, pos_rows, focus,
         skill_id=skill_id, skill_params=skill_params,
+        usage_info=usage_info,
     ):
         try:
             evt = json.loads(chunk)
@@ -938,6 +955,8 @@ async def analyze_positions_once(
             meta = evt
         elif t == "delta":
             content_parts.append(evt.get("content", ""))
+        elif t == "done":
+            meta = {**meta, "usage": evt.get("usage") or {}, "duration_ms": evt.get("duration_ms")}
         elif t == "error":
             return None, meta
     content = "".join(content_parts).strip()

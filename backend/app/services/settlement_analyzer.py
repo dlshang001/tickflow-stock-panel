@@ -12,6 +12,8 @@ import logging
 from datetime import date
 from typing import AsyncIterator
 
+from app.services.ai_provider import CancelCheck
+
 logger = logging.getLogger(__name__)
 
 
@@ -323,6 +325,8 @@ async def analyze_settlement_stream(
     focus: str = "",
     skill_id: str | None = None,
     skill_params: dict | None = None,
+    usage_info: dict | None = None,
+    cancel_check: CancelCheck = None,
 ) -> AsyncIterator[str]:
     """流式交割单分析 — yield 出 NDJSON 事件。
 
@@ -496,7 +500,12 @@ async def analyze_settlement_stream(
             ],
             temperature=0.5,
             max_tokens=4000,
+            usage_info=usage_info,
+            cancel_check=cancel_check,
         ):
+            if cancel_check is not None and await cancel_check():
+                logger.info("[stream] stage5/5 llm cancelled by client, chunks=%d", chunk_count)
+                break
             chunk_count += 1
             yield json.dumps({"type": "delta", "content": delta}, ensure_ascii=False)
             # 每 50 个 chunk 打一次进度
@@ -514,7 +523,11 @@ async def analyze_settlement_stream(
         yield json.dumps({"type": "error", "message": f"AI 分析失败: {e}"}, ensure_ascii=False)
         return
 
-    yield json.dumps({"type": "done"}, ensure_ascii=False)
+    yield json.dumps({
+        "type": "done",
+        "usage": usage_info or {},
+        "duration_ms": int((_time.monotonic() - _t_start) * 1000),
+    }, ensure_ascii=False)
     _t_end = _time.monotonic()
     logger.info("[stream] completed, total_elapsed=%.1fms, stages=[stats=%.1fms, reconcile=%.1fms, position=%.1fms, prompt=%.1fms, llm=%.1fms]",
         (_t_end - _t_start) * 1000,
@@ -530,16 +543,18 @@ async def analyze_settlement_once(
     focus: str = "",
     skill_id: str | None = None,
     skill_params: dict | None = None,
+    usage_info: dict | None = None,
 ) -> tuple[str | None, dict]:
     """非流式交割单分析 —— 供定时任务/推送等只需最终文本的调用方。
 
     返回 (content, meta):content 为完整 Markdown,失败为 None;
-    meta 至少含 {"as_of", "summary"}。
+    meta 至少含 {"as_of", "summary"}, 且含 usage / duration_ms。
     """
     content_parts: list[str] = []
     meta: dict = {"as_of": date.today().isoformat()}
     async for evt in analyze_settlement_stream(
         focus, skill_id=skill_id, skill_params=skill_params,
+        usage_info=usage_info,
     ):
         try:
             obj = json.loads(evt)
@@ -550,6 +565,8 @@ async def analyze_settlement_once(
             meta = obj
         elif t == "delta":
             content_parts.append(obj.get("content", ""))
+        elif t == "done":
+            meta = {**meta, "usage": obj.get("usage") or {}, "duration_ms": obj.get("duration_ms")}
         elif t == "error":
             logger.warning("settlement analyze error event: %s", obj.get("message"))
             return None, meta

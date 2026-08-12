@@ -22,12 +22,16 @@ META: dict[str, Any] = {
             "label": "无风险利率",
             "type": "float",
             "default": 0.02,
+            "description": "无风险利率(用于夏普等风险指标计算, 0-1)",
+            "min": 0,
+            "max": 0.2,
         },
         {
             "key": "include_stress_test",
             "label": "包含压力测试",
             "type": "bool",
             "default": False,
+            "description": "是否包含压力测试(极端行情下的回撤推演)",
         },
     ],
 }

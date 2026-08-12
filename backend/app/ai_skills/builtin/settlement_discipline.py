@@ -21,12 +21,16 @@ META: dict[str, Any] = {
             "label": "纪律合格阈值",
             "type": "float",
             "default": 0.7,
+            "description": "纪律评分阈值(低于此值触发纪律提示, 0-1)",
+            "min": 0,
+            "max": 1,
         },
         {
             "key": "include_warning_examples",
             "label": "包含警示案例",
             "type": "bool",
             "default": True,
+            "description": "是否包含典型违规案例示例",
         },
     ],
 }

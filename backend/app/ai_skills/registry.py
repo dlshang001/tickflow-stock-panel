@@ -207,14 +207,17 @@ def validate_params(meta: dict, raw_params: dict | None) -> dict:
             value = bool(value) if not isinstance(value, bool) else value
         elif ptype == "int":
             value = int(value)
+            value = _clamp(value, spec)
         elif ptype == "float":
             value = float(value)
+            value = _clamp(value, spec)
         elif ptype == "select":
             options = spec.get("options", [])
             if options and value not in options:
                 value = spec.get("default", options[0] if options else None)
         elif ptype == "number":
             value = float(value) if "." in str(value) else int(value)
+            value = _clamp(value, spec)
 
         result[pid] = value
 
@@ -224,6 +227,21 @@ def validate_params(meta: dict, raw_params: dict | None) -> dict:
             result[key] = val
 
     return result
+
+
+def _clamp(value: int | float, spec: dict[str, Any]) -> int | float:
+    """数值参数范围钳制: 超出 [min, max] 时回落到最近的边界值。
+
+    防止通过 API 直接传入极端值(如 max_sectors=-1)污染 prompt。
+    未定义 min/max 时原样返回。
+    """
+    pmin = spec.get("min")
+    pmax = spec.get("max")
+    if pmin is not None and value < pmin:
+        return pmin
+    if pmax is not None and value > pmax:
+        return pmax
+    return value
 
 
 def reload() -> None:

@@ -21,6 +21,9 @@ META: dict[str, Any] = {
             "label": "时机分析回溯天数",
             "type": "int",
             "default": 20,
+            "description": "买卖时机质量回溯天数",
+            "min": 5,
+            "max": 60,
         },
         {
             "key": "quality_threshold",
@@ -28,6 +31,7 @@ META: dict[str, Any] = {
             "type": "select",
             "options": ["严格", "标准", "宽松"],
             "default": "标准",
+            "description": "时机质量判定阈值档次",
         },
     ],
 }

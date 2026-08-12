@@ -21,6 +21,7 @@ META: dict[str, Any] = {
             "label": "包含背离分析",
             "type": "bool",
             "default": True,
+            "description": "是否包含量价背离分析",
         },
         {
             "key": "timeframe",
@@ -28,6 +29,7 @@ META: dict[str, Any] = {
             "type": "select",
             "options": ["日线", "周线", "月线"],
             "default": "日线",
+            "description": "技术分析周期(日线/周线/月线)",
         },
     ],
 }

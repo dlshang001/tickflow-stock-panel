@@ -22,12 +22,14 @@ META: dict[str, Any] = {
             "type": "select",
             "options": ["保守", "中性", "激进"],
             "default": "中性",
+            "description": "风险偏好(影响风险提示的措辞强度)",
         },
         {
             "key": "include_stoploss_suggestions",
             "label": "包含止损位建议",
             "type": "bool",
             "default": True,
+            "description": "是否包含止损建议(仅客观提示,不构成操作指令)",
         },
     ],
 }

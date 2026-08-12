@@ -11,7 +11,10 @@ import sys
 import tempfile
 import time
 import tomllib
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+
+# 取消检查回调: async 可调用, 返回 True 表示应中断流式生成。
+CancelCheck = Callable[[], Awaitable[bool]] | None
 from pathlib import Path
 from types import TracebackType
 from urllib.parse import urlsplit, urlunsplit
@@ -213,9 +216,13 @@ async def stream_ai_text(
     temperature: float | None = 0.5,
     max_tokens: int = 4000,
     timeout: float = 180.0,
+    usage_info: dict | None = None,
+    cancel_check: CancelCheck = None,
 ) -> AsyncIterator[str]:
     """Yield text deltas from the configured provider.
 
+    - usage_info: 可选 dict, 流结束后填充 {"prompt_tokens","completion_tokens","total_tokens"}。
+    - cancel_check: 可选 async 回调, 每次收到 chunk 时检查, 返回 True 则中断。
     Codex CLI only exposes the final assistant message for this use case, so it
     yields one complete chunk after the command exits.
     """
@@ -228,6 +235,8 @@ async def stream_ai_text(
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,
+        usage_info=usage_info,
+        cancel_check=cancel_check,
     ):
         yield chunk
 
@@ -277,6 +286,8 @@ async def _stream_openai(
     temperature: float | None,
     max_tokens: int,
     timeout: float,
+    usage_info: dict | None = None,
+    cancel_check: CancelCheck = None,
 ) -> AsyncIterator[str]:
     ai_key = secrets_store.get_ai_key()
     if not ai_key:
@@ -288,26 +299,41 @@ async def _stream_openai(
 
     async def _iter(stream):
         async for chunk in stream:
+            # 取消检查:客户端断开时请求方传入的 cancel_check 返回 True
+            if cancel_check is not None and await cancel_check():
+                return
+            usage = getattr(chunk, "usage", None)
+            if usage is not None:
+                if usage_info is not None:
+                    usage_info["prompt_tokens"] = getattr(usage, "prompt_tokens", 0) or 0
+                    usage_info["completion_tokens"] = getattr(usage, "completion_tokens", 0) or 0
+                    usage_info["total_tokens"] = getattr(usage, "total_tokens", 0) or 0
+                continue
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta and delta.content:
                 yield delta.content
 
-    try:
-        stream = await client.chat.completions.create(
+    async def _create(include_usage: bool):
+        kwargs = _openai_kwargs(temperature=temperature, max_tokens=max_tokens)
+        kwargs["stream"] = True
+        if include_usage:
+            kwargs["stream_options"] = {"include_usage": True}
+        return await client.chat.completions.create(
             model=model,
             messages=req_messages,
-            **_openai_kwargs(temperature=temperature, max_tokens=max_tokens),
-            stream=True,
+            **kwargs,
         )
+
+    try:
+        stream = await _create(include_usage=True)
     except Exception as exc:
-        # 流尚未开始 yield, 可安全重建: 去掉 temperature 后重开 stream。
-        if temperature is not None and _is_temperature_rejected(exc):
-            stream = await client.chat.completions.create(
-                model=model,
-                messages=req_messages,
-                **_openai_kwargs(temperature=None, max_tokens=max_tokens),
-                stream=True,
-            )
+        # 部分 OpenAI 兼容服务不接受 stream_options/include_usage, 降级为不传 usage。
+        if _is_include_usage_rejected(exc):
+            stream = await _create(include_usage=False)
+        # Reasoning 类模型拒绝任意 temperature: 去掉 temperature 后重开流。
+        elif temperature is not None and _is_temperature_rejected(exc):
+            temperature = None
+            stream = await _create(include_usage=True)
         else:
             if _is_openai_transport_error(exc):
                 raise RuntimeError(_format_openai_error(exc)) from exc
@@ -320,6 +346,14 @@ async def _stream_openai(
         if _is_openai_transport_error(exc):
             raise RuntimeError(_format_openai_error(exc)) from exc
         raise
+
+
+def _is_include_usage_rejected(exc: Exception) -> bool:
+    """True if the upstream 400 is specifically about the stream_options/include_usage param."""
+    if getattr(exc, "status_code", None) != 400:
+        return False
+    text = (_openai_error_detail(exc) or str(exc)).lower()
+    return "include_usage" in text or "stream_options" in text
 
 
 def _openai_client(api_key: str, timeout: float):

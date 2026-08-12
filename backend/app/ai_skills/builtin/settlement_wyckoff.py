@@ -15,21 +15,7 @@ META: dict[str, Any] = {
     "tags": ["威科夫", "交易行为", "交割单", "多维度分析"],
     "emoji": "🎯",
     "default_for_category": True,
-    "params": [
-        {
-            "key": "include_followup_plan",
-            "label": "包含后续改进计划",
-            "type": "bool",
-            "default": True,
-        },
-        {
-            "key": "risk_level",
-            "label": "风险偏好",
-            "type": "select",
-            "options": ["保守", "均衡", "激进"],
-            "default": "均衡",
-        },
-    ],
+    "params": [],
 }
 
 _SYSTEM_PROMPT = """你是**威科夫交易行为分析专家**。基于用户的真实交割单数据（以及持仓/对账数据），做交易行为诊断和行情对照分析，输出包含以下维度的报告：

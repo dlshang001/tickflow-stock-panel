@@ -22,12 +22,18 @@ META: dict[str, Any] = {
             "label": "偏离预警阈值(%)",
             "type": "float",
             "default": 5.0,
+            "description": "偏离阈值(与目标仓位的偏离容忍度, %)",
+            "min": 0,
+            "max": 100,
         },
         {
             "key": "max_single_position_pct",
             "label": "单票上限(%)",
             "type": "float",
             "default": 40.0,
+            "description": "单只持仓最大占比(超限提示, %)",
+            "min": 0,
+            "max": 100,
         },
     ],
 }

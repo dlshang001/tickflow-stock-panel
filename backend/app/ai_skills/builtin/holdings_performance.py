@@ -23,12 +23,14 @@ META: dict[str, Any] = {
             "type": "select",
             "options": ["近一月", "近三月", "近半年", "近一年"],
             "default": "近三月",
+            "description": "归因分析周期",
         },
         {
             "key": "show_benchmark",
             "label": "显示基准对比",
             "type": "bool",
             "default": True,
+            "description": "是否与基准指数对比",
         },
     ],
 }

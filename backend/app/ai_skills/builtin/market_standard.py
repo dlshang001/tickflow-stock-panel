@@ -18,16 +18,13 @@ META: dict[str, Any] = {
     "default_for_category": True,
     "params": [
         {
-            "key": "include_watch_points",
-            "label": "包含观察要点",
-            "type": "bool",
-            "default": True,
-        },
-        {
             "key": "max_sectors",
             "label": "板块排名数量",
             "type": "int",
             "default": 5,
+            "description": "板块排名展示数量(领涨概念/行业各取前 N 名)",
+            "min": 1,
+            "max": 20,
         },
     ],
 }

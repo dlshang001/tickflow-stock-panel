@@ -22,12 +22,16 @@ META: dict[str, Any] = {
             "label": "集中度预警阈值(%)",
             "type": "float",
             "default": 30.0,
+            "description": "集中度预警阈值(单一行业/标的风险提示触发线, %)",
+            "min": 0,
+            "max": 100,
         },
         {
             "key": "include_concept_analysis",
             "label": "包含概念维度分析",
             "type": "bool",
             "default": True,
+            "description": "是否包含概念归属分析",
         },
     ],
 }

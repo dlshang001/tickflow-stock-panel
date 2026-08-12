@@ -66,6 +66,8 @@ class JsonReportStore:
                     r.setdefault("skill_name", None)
                     r.setdefault("skill_params", {})
                     r.setdefault("model", None)
+                    r.setdefault("usage", {})
+                    r.setdefault("duration_ms", None)
                 return sorted(data, key=lambda r: r.get("created_at", ""), reverse=True)
         except Exception as e:  # noqa: BLE001
             logger.warning("%s malformed: %s", self.filename, e)

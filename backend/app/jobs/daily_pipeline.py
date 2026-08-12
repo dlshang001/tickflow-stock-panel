@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from datetime import date
 from pathlib import Path
 
 import polars as pl
@@ -668,6 +669,57 @@ POSITION_REVIEW_JOB_ID = "scheduled_position_review"
 SETTLEMENT_REVIEW_JOB_ID = "scheduled_settlement_review"
 
 
+def _latest_enriched_date(repo) -> date | None:
+    """零扫描取 enriched 最新分区日期(不读任何 parquet)。
+
+    定时复盘据此做数据就绪检查: 若数据距今过久(长假/数据管道异常), 跳过生成,
+    避免在过期数据上产出误导性的复盘报告。
+    """
+    enriched_dir = repo.store.data_dir / "kline_daily_enriched"
+    if not enriched_dir.exists():
+        return None
+    latest: date | None = None
+    for d in enriched_dir.iterdir():
+        if d.is_dir() and d.name.startswith("date="):
+            try:
+                dt = date.fromisoformat(d.name[5:])
+            except ValueError:
+                continue
+            if latest is None or dt > latest:
+                latest = dt
+    return latest
+
+
+def _scheduled_review_stale(repo) -> bool:
+    """数据是否过期(距今 ≥7 天, 覆盖国庆/春节整周长假)。True = 应跳过本次复盘。"""
+    latest = _latest_enriched_date(repo)
+    if latest is None:
+        logger.info("scheduled review skipped: no enriched data (data not synced)")
+        return True
+    stale_days = (date.today() - latest).days
+    if stale_days >= 7:
+        logger.info("scheduled review skipped: data stale (%s, %d days ago)", latest, stale_days)
+        return True
+    return False
+
+
+async def _run_once_with_retry(coro_factory, max_attempts: int = 3):
+    """非流式复盘(持仓/交割单)统一重试: coro_factory 每次返回 (content, meta)。
+
+    失败(无 content)时最多重试 max_attempts-1 次, 间隔 3s。耗尽返回 (None, {})。
+    """
+    import asyncio
+
+    for attempt in range(1, max_attempts + 1):
+        content, meta = await coro_factory()
+        if content:
+            return content, meta
+        if attempt < max_attempts:
+            logger.warning("review once attempt %d/%d produced no content, retrying in 3s", attempt, max_attempts)
+            await asyncio.sleep(3)
+    return None, {}
+
+
 async def _run_scheduled_review(repo) -> None:
     """定时复盘 job: 流式生成复盘 → 实时推 SSE(开着页面可见) → 落盘归档 → 推飞书。
 
@@ -682,6 +734,11 @@ async def _run_scheduled_review(repo) -> None:
     try:
         from app.services import market_recap_reports, preferences
         from app import secrets_store as ss
+
+        # 数据就绪检查: 长假/数据管道异常时跳过, 避免在过期数据上生成复盘
+        if _scheduled_review_stale(repo):
+            return
+
 
         # AI Key 未配置时跳过(避免每日报错刷日志)
         if not ss.get_ai_key():
@@ -722,6 +779,8 @@ async def _run_scheduled_review(repo) -> None:
             "skill_name": meta.get("skill_name"),
             "skill_params": meta.get("skill_params"),
             "model": meta.get("model"),
+            "usage": meta.get("usage") or {},
+            "duration_ms": meta.get("duration_ms"),
         })
         logger.info("scheduled review saved: as_of=%s skill=%s", meta.get("as_of"), meta.get("skill_id"))
 
@@ -786,7 +845,12 @@ async def _stream_review_with_retry(repo, quote_service, depth_service, skill_id
                                    attempt, max_attempts, evt.get("message"))
                     break  # 触发重试
                 elif t == "done":
-                    # 正常完成
+                    # 正常完成: 补上 usage / duration_ms(来自 done 事件)
+                    last_meta = {
+                        **last_meta,
+                        "usage": evt.get("usage") or {},
+                        "duration_ms": evt.get("duration_ms"),
+                    }
                     return "".join(content_parts), last_meta
             # 流自然结束(无 done 事件)且有内容, 视为成功
             if content_parts and not failed:
@@ -874,6 +938,10 @@ async def _run_scheduled_position_review(repo) -> None:
             logger.info("scheduled position review skipped: AI key not configured")
             return
 
+        # 数据就绪检查: 数据过期时跳过
+        if _scheduled_review_stale(repo):
+            return
+
         pos_rows = positions.list_rows()
         if not pos_rows:
             logger.info("scheduled position review skipped: no positions")
@@ -889,9 +957,11 @@ async def _run_scheduled_position_review(repo) -> None:
             "scheduled position review start, skill_id=%s, params=%s",
             skill_id, skill_params,
         )
-        content, meta = await analyze_positions_once(
-            repo, quote_service, pos_rows,
-            focus="", skill_id=skill_id, skill_params=skill_params,
+        content, meta = await _run_once_with_retry(
+            lambda: analyze_positions_once(
+                repo, quote_service, pos_rows,
+                focus="", skill_id=skill_id, skill_params=skill_params,
+            )
         )
         if not content:
             logger.warning("scheduled position review produced no content")
@@ -908,6 +978,8 @@ async def _run_scheduled_position_review(repo) -> None:
             "skill_name": meta.get("skill_name"),
             "skill_params": meta.get("skill_params"),
             "model": meta.get("model"),
+            "usage": meta.get("usage") or {},
+            "duration_ms": meta.get("duration_ms"),
         })
         logger.info("scheduled position review saved: as_of=%s skill=%s", meta.get("as_of"), meta.get("skill_id"))
 
@@ -984,6 +1056,10 @@ async def _run_scheduled_settlement_review(repo) -> None:
             logger.info("scheduled settlement review skipped: AI key not configured")
             return
 
+        # 数据就绪检查: 数据过期时跳过
+        if _scheduled_review_stale(repo):
+            return
+
         records = settlement.all_records()
         if not records:
             logger.info("scheduled settlement review skipped: no settlement records")
@@ -994,8 +1070,10 @@ async def _run_scheduled_settlement_review(repo) -> None:
         skill_params = default_skill.get("params") or {}
         logger.info("scheduled settlement review start, skill_id=%s, params=%s", skill_id, skill_params)
 
-        content, meta = await analyze_settlement_once(
-            focus="", skill_id=skill_id, skill_params=skill_params,
+        content, meta = await _run_once_with_retry(
+            lambda: analyze_settlement_once(
+                focus="", skill_id=skill_id, skill_params=skill_params,
+            )
         )
         if not content:
             logger.warning("scheduled settlement review produced no content")
@@ -1012,6 +1090,8 @@ async def _run_scheduled_settlement_review(repo) -> None:
             "skill_name": meta.get("skill_name"),
             "skill_params": meta.get("skill_params"),
             "model": meta.get("model"),
+            "usage": meta.get("usage") or {},
+            "duration_ms": meta.get("duration_ms"),
         })
         logger.info("scheduled settlement review saved: as_of=%s skill=%s", meta.get("as_of"), meta.get("skill_id"))
 

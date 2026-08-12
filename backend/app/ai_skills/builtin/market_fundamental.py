@@ -21,12 +21,16 @@ META: dict[str, Any] = {
             "label": "新闻回溯天数",
             "type": "int",
             "default": 3,
+            "description": "新闻回溯天数(AI 结合近 N 日消息做基本面催化分析)",
+            "min": 1,
+            "max": 10,
         },
         {
             "key": "include_policy_analysis",
             "label": "包含政策分析",
             "type": "bool",
             "default": True,
+            "description": "是否包含政策面分析",
         },
     ],
 }

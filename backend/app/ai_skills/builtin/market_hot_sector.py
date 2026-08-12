@@ -21,12 +21,16 @@ META: dict[str, Any] = {
             "label": "连板分析层数",
             "type": "int",
             "default": 5,
+            "description": "热点板块分析数量(取涨幅前 N 大板块深入分析)",
+            "min": 1,
+            "max": 15,
         },
         {
             "key": "include_sector_sustainability",
             "label": "包含板块可持续性分析",
             "type": "bool",
             "default": True,
+            "description": "是否包含板块持续性判断",
         },
     ],
 }

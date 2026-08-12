@@ -40,6 +40,9 @@ export interface ReviewMeta {
   skill_params?: Record<string, any> | null
   // 生成时使用的 AI 模型(用于历史报告区分来源)
   model?: string | null
+  // Token 用量与耗时(生成完成后从 done 事件带出)
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null
+  duration_ms?: number | null
 }
 
 export interface ReviewState {
@@ -178,6 +181,15 @@ export async function startGeneration(
         notify()
         return
       } else if (evt.type === 'done') {
+        // done 事件携带 usage / duration_ms(生成完成后统计)
+        if (evt.usage || evt.duration_ms != null) {
+          doneMeta = {
+            ...(doneMeta ?? {}),
+            usage: evt.usage ?? null,
+            duration_ms: evt.duration_ms ?? null,
+          }
+          states[tab] = { ...states[tab], meta: doneMeta }
+        }
         states[tab] = { ...states[tab], phase: 'done' }
         notify()
       }
@@ -202,10 +214,14 @@ export async function startGeneration(
   }
 }
 
-/** 中断指定 tab 的生成。 */
+/** 中断指定 tab 的生成。保留已生成的部分内容,标记为已完成(取消而非失败)。 */
 export function abortGeneration(tab: ReviewTab = 'market'): void {
   abortCtrls[tab]?.abort()
   abortCtrls[tab] = null
+  if (states[tab].phase === 'loading' || states[tab].phase === 'streaming') {
+    states[tab] = { ...states[tab], phase: states[tab].content ? 'done' : 'idle' }
+    notify()
+  }
 }
 
 /** 重置指定 tab 到 idle。 */

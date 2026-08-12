@@ -77,6 +77,7 @@ async def analyze_market(request: Request, req: AnalyzeRequest):
             repo, quote_service, depth_service, as_of, req.focus,
             skill_id=req.skill_id,
             skill_params=req.skill_params,
+            cancel_check=lambda: request.is_disconnected(),
         ):
             yield chunk + "\n"
 
@@ -102,6 +103,9 @@ class SaveReportRequest(BaseModel):
     skill_id: str | None = None
     skill_name: str | None = None
     skill_params: dict | None = None
+    model: str | None = None
+    usage: dict | None = None
+    duration_ms: int | None = None
 
 
 @router.get("/reports")
@@ -123,6 +127,9 @@ def save_report(request: Request, req: SaveReportRequest):
         "skill_id": req.skill_id,
         "skill_name": req.skill_name,
         "skill_params": req.skill_params or {},
+        "model": req.model,
+        "usage": req.usage or {},
+        "duration_ms": req.duration_ms,
     })
     # 推送到飞书(可选): 与定时复盘共用同一开关 review_push_enabled 与 _maybe_push_review。
     # 内部 try/except 静默降级, 不影响归档返回值。

@@ -183,10 +183,13 @@ async def analyze_settlement(request: Request, req: AnalyzeRequest):
 
         meta: dict = {}
         content_parts: list[str] = []
+        usage: dict = {}
+        duration_ms: int | None = None
         async for chunk in analyze_settlement_stream(
             req.focus,
             skill_id=req.skill_id,
             skill_params=req.skill_params,
+            cancel_check=lambda: request.is_disconnected(),
         ):
             try:
                 evt = json.loads(chunk)
@@ -194,6 +197,9 @@ async def analyze_settlement(request: Request, req: AnalyzeRequest):
                     meta = evt
                 elif evt.get("type") == "delta":
                     content_parts.append(evt.get("content", ""))
+                elif evt.get("type") == "done":
+                    usage = evt.get("usage") or {}
+                    duration_ms = evt.get("duration_ms")
             except Exception:  # noqa: BLE001
                 pass
             yield chunk + "\n"
@@ -211,6 +217,8 @@ async def analyze_settlement(request: Request, req: AnalyzeRequest):
                     "skill_name": meta.get("skill_name"),
                     "skill_params": meta.get("skill_params") or {},
                     "model": meta.get("model"),
+                    "usage": usage,
+                    "duration_ms": duration_ms,
                 })
             except Exception as e:  # noqa: BLE001
                 logger.warning("auto-save settlement report failed: %s", e)
