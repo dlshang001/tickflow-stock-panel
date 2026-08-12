@@ -555,7 +555,7 @@ export function Review() {
               </div>
 
               {/* ===== 报告 + 历史 双栏(报告为主体)===== */}
-              <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr_18rem]">
+              <div className="grid grid-cols-1 gap-3 lg:grid-cols-[1fr_22rem]">
                 <ReportPanel
                   tab={activeTab}
                   tabConfig={tabConfig}
@@ -1133,22 +1133,22 @@ function HistoryPanel({
             <div className="text-sm text-muted/60">生成完成后自动归档</div>
           </div>
         ) : (
-          <div className="space-y-1">
+          <div className="space-y-1.5">
             {/* 生成中占位项:列表顶部,点击回到正在生成的流式内容 */}
             {generating && (
               <div
                 className={cn(
-                  'flex items-center gap-2 rounded px-2 py-2 cursor-pointer transition-colors',
+                  'flex items-start gap-2.5 rounded px-2 py-2.5 cursor-pointer transition-colors',
                   viewingId === null ? 'bg-accent/10 ring-1 ring-accent/20' : 'hover:bg-elevated/60',
                 )}
                 onClick={onBackToGenerating}
               >
-                <div className="grid h-8 w-8 shrink-0 place-items-center rounded bg-accent/15">
-                  <RefreshCw className="h-3.5 w-3.5 animate-spin text-accent" />
+                <div className="grid h-9 w-9 shrink-0 place-items-center rounded bg-accent/15">
+                  <RefreshCw className="h-4 w-4 animate-spin text-accent" />
                 </div>
-                <div className="min-w-0 flex-1">
+                <div className="min-w-0 flex-1 space-y-1">
                   <div className="truncate text-sm font-medium text-accent">生成中…</div>
-                  <div className="mt-0.5 truncate text-sm text-secondary">{tabConfig.loadingText}</div>
+                  <div className="text-sm text-secondary">{tabConfig.loadingText}</div>
                 </div>
               </div>
             )}
@@ -1263,42 +1263,41 @@ function HistoryPanel({
                 <div
                   key={r.id}
                   className={cn(
-                    'group flex items-center gap-2 rounded px-2 py-2 cursor-pointer transition-colors',
+                    'group flex items-start gap-2.5 rounded px-2 py-2.5 cursor-pointer transition-colors',
                     viewingId === r.id ? 'bg-accent/10 ring-1 ring-accent/20' : 'hover:bg-elevated/60',
                   )}
                   onClick={() => onView(r)}
                 >
                   {badge}
-                  <div className="min-w-0 flex-1">
+                  <div className="min-w-0 flex-1 space-y-1">
                     <div className="flex items-center gap-1.5">
                       {primary}
-                      {(() => {
-                        // Skill 徽章:有 skill_name 优先显示名称;否则 skill_id;老报告无信息显示"默认 Prompt"灰徽
-                        const badgeText = r.skill_name ?? r.skill_id ?? '默认 Prompt'
-                        const hasSkill = !!(r.skill_name || r.skill_id)
-                        return (
-                          <span
-                            className={cn(
-                              'ml-0.5 inline-flex items-center rounded-full px-1.5 py-px text-xs font-medium',
-                              hasSkill
-                                ? 'bg-accent/10 text-accent'
-                                : 'bg-elevated text-muted',
-                            )}
-                            title={hasSkill ? `Skill: ${r.skill_id ?? r.skill_name}` : '使用默认硬编码 Prompt 生成'}
-                          >
-                            {badgeText}
-                          </span>
-                        )
-                      })()}
                     </div>
-                    <div className="mt-0.5">{secondary}</div>
+                    {(() => {
+                      const badgeText = r.skill_name ?? r.skill_id ?? '默认 Prompt'
+                      const hasSkill = !!(r.skill_name || r.skill_id)
+                      return (
+                        <span
+                          className={cn(
+                            'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium w-fit',
+                            hasSkill
+                              ? 'bg-accent/10 text-accent'
+                              : 'bg-elevated text-muted',
+                          )}
+                          title={hasSkill ? `Skill: ${r.skill_id ?? r.skill_name}` : '使用默认硬编码 Prompt 生成'}
+                        >
+                          {badgeText}
+                        </span>
+                      )
+                    })()}
+                    <div className="text-sm">{secondary}</div>
                     {r.created_at && (
-                      <div className="mt-0.5 font-mono text-xs text-muted">{fmtArchivedAt(r.created_at)}</div>
+                      <div className="font-mono text-xs text-muted">{fmtArchivedAt(r.created_at)}</div>
                     )}
                   </div>
                   <button
                     onClick={(e) => { e.stopPropagation(); onDelete(r.id) }}
-                    className="shrink-0 p-1 text-muted opacity-0 transition-all hover:text-bear group-hover:opacity-100"
+                    className="mt-0.5 shrink-0 p-1 text-muted opacity-0 transition-all hover:text-bear group-hover:opacity-100"
                     title="删除"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
