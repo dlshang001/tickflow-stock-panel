@@ -721,6 +721,7 @@ async def _run_scheduled_review(repo) -> None:
             "skill_id": meta.get("skill_id"),
             "skill_name": meta.get("skill_name"),
             "skill_params": meta.get("skill_params"),
+            "model": meta.get("model"),
         })
         logger.info("scheduled review saved: as_of=%s skill=%s", meta.get("as_of"), meta.get("skill_id"))
 
@@ -906,6 +907,7 @@ async def _run_scheduled_position_review(repo) -> None:
             "skill_id": meta.get("skill_id"),
             "skill_name": meta.get("skill_name"),
             "skill_params": meta.get("skill_params"),
+            "model": meta.get("model"),
         })
         logger.info("scheduled position review saved: as_of=%s skill=%s", meta.get("as_of"), meta.get("skill_id"))
 
@@ -1009,6 +1011,7 @@ async def _run_scheduled_settlement_review(repo) -> None:
             "skill_id": meta.get("skill_id"),
             "skill_name": meta.get("skill_name"),
             "skill_params": meta.get("skill_params"),
+            "model": meta.get("model"),
         })
         logger.info("scheduled settlement review saved: as_of=%s skill=%s", meta.get("as_of"), meta.get("skill_id"))
 

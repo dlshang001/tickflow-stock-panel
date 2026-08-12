@@ -210,6 +210,7 @@ async def analyze_settlement(request: Request, req: AnalyzeRequest):
                     "skill_id": meta.get("skill_id"),
                     "skill_name": meta.get("skill_name"),
                     "skill_params": meta.get("skill_params") or {},
+                    "model": meta.get("model"),
                 })
             except Exception as e:  # noqa: BLE001
                 logger.warning("auto-save settlement report failed: %s", e)

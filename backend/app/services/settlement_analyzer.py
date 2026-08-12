@@ -454,6 +454,7 @@ async def analyze_settlement_stream(
         logger.info("[stream] stage4/5 [skill] no skill_id provided, using default prompts")
 
     # meta 事件(skill 解析完成后发送,携带 skill 字段)
+    from app.services.ai_provider import current_ai_model
     yield json.dumps({
         "type": "meta",
         "summary": {
@@ -467,6 +468,7 @@ async def analyze_settlement_stream(
         "skill_id": resolved_skill_id,
         "skill_name": resolved_skill_name,
         "skill_params": resolved_skill_params,
+        "model": current_ai_model(),
     }, ensure_ascii=False)
 
     logger.info(

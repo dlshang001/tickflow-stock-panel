@@ -334,6 +334,7 @@ async def recap_market_stream(
             logger.info("market_recap: [skill] no skill_id provided, using default prompts")
 
         # 2. meta 事件(前端据此先渲染信号灯/看板) —— 放在 skill 解析之后,携带 skill 字段
+        from app.services.ai_provider import current_ai_model
         yield json.dumps({
             "type": "meta",
             "as_of": as_of_str,
@@ -343,6 +344,7 @@ async def recap_market_stream(
             "skill_id": resolved_skill_id,
             "skill_name": resolved_skill_name,
             "skill_params": resolved_skill_params,
+            "model": current_ai_model(),
         }, ensure_ascii=False)
 
         async for delta in stream_ai_text(

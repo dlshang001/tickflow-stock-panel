@@ -352,6 +352,7 @@ export function Review() {
         skill_id: doneMeta?.skill_id ?? null,
         skill_name: doneMeta?.skill_name ?? null,
         skill_params: doneMeta?.skill_params ?? null,
+        model: doneMeta?.model ?? null,
       })
       qc.invalidateQueries({ queryKey: QK.reviewReports })
     } catch { /* 静默 */ }
@@ -1277,17 +1278,27 @@ function HistoryPanel({
                       const badgeText = r.skill_name ?? r.skill_id ?? '默认 Prompt'
                       const hasSkill = !!(r.skill_name || r.skill_id)
                       return (
-                        <span
-                          className={cn(
-                            'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium w-fit',
-                            hasSkill
-                              ? 'bg-accent/10 text-accent'
-                              : 'bg-elevated text-muted',
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span
+                            className={cn(
+                              'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium',
+                              hasSkill
+                                ? 'bg-accent/10 text-accent'
+                                : 'bg-elevated text-muted',
+                            )}
+                            title={hasSkill ? `Skill: ${r.skill_id ?? r.skill_name}` : '使用默认硬编码 Prompt 生成'}
+                          >
+                            {badgeText}
+                          </span>
+                          {r.model && (
+                            <span
+                              className="inline-flex items-center rounded-full bg-bear/15 px-2.5 py-0.5 text-xs font-medium text-bear"
+                              title={`AI 模型: ${r.model}`}
+                            >
+                              {r.model}
+                            </span>
                           )}
-                          title={hasSkill ? `Skill: ${r.skill_id ?? r.skill_name}` : '使用默认硬编码 Prompt 生成'}
-                        >
-                          {badgeText}
-                        </span>
+                        </div>
                       )
                     })()}
                     <div className="text-sm">{secondary}</div>

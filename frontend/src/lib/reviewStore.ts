@@ -38,6 +38,8 @@ export interface ReviewMeta {
   skill_id?: string | null
   skill_name?: string | null
   skill_params?: Record<string, any> | null
+  // 生成时使用的 AI 模型(用于历史报告区分来源)
+  model?: string | null
 }
 
 export interface ReviewState {

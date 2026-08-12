@@ -871,6 +871,7 @@ async def analyze_positions_stream(
             logger.info("position_analyze: [skill] no skill_id provided, using default prompts")
 
         logger.info("position_analyze: meta yield, count=%d, skill=%s", summary["count"], resolved_skill_id)
+        from app.services.ai_provider import current_ai_model
         yield json.dumps({
             "type": "meta",
             "count": summary["count"],
@@ -881,6 +882,7 @@ async def analyze_positions_stream(
             "skill_id": resolved_skill_id,
             "skill_name": resolved_skill_name,
             "skill_params": resolved_skill_params,
+            "model": current_ai_model(),
         }, ensure_ascii=False)
 
         logger.info(

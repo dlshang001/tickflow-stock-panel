@@ -653,6 +653,8 @@ export interface AiReviewReport {
   skill_id?: string | null
   skill_name?: string | null
   skill_params?: Record<string, any> | null
+  // 生成时使用的 AI 模型(null = 老报告无记录)
+  model?: string | null
 }
 
 // ===== Strategy Engine =====
@@ -2413,6 +2415,7 @@ export const api = {
     as_of: string; focus?: string; content: string
     summary?: string; emotion_score?: number | null; emotion_label?: string
     skill_id?: string | null; skill_name?: string | null; skill_params?: Record<string, any> | null
+    model?: string | null
   }) =>
     request<{ ok: boolean; report: AiReviewReport }>('/api/market-recap/reports', {
       method: 'POST', body: JSON.stringify(r),
