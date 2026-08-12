@@ -48,13 +48,23 @@ class JsonReportStore:
         return p
 
     def list_reports(self) -> list[dict]:
-        """返回全部报告(按 created_at 降序)。"""
+        """返回全部报告(按 created_at 降序)。
+
+        对老报告补 skill_id/skill_name/skill_params 默认值(null),
+        保证前端徽章等展示逻辑无需判 key 存否。
+        """
         p = self._path()
         if not p.exists():
             return []
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
             if isinstance(data, list):
+                for r in data:
+                    if not isinstance(r, dict):
+                        continue
+                    r.setdefault("skill_id", None)
+                    r.setdefault("skill_name", None)
+                    r.setdefault("skill_params", {})
                 return sorted(data, key=lambda r: r.get("created_at", ""), reverse=True)
         except Exception as e:  # noqa: BLE001
             logger.warning("%s malformed: %s", self.filename, e)

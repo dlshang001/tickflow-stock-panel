@@ -289,16 +289,12 @@ async def recap_market_stream(
 
     emo = overview.get("emotion") or {}
 
-    # 2. meta 事件(前端据此先渲染信号灯/看板)
-    yield json.dumps({
-        "type": "meta",
-        "as_of": as_of_str,
-        "emotion_score": emo.get("score", 50),
-        "emotion_label": emo.get("label", "—"),
-        "summary": _recap_summary(overview),
-    }, ensure_ascii=False)
-
-    # 3+4. 组装 prompt (Skill 委托 or 硬编码) + 流式调用 LLM
+    # 3. 组装 prompt (Skill 委托 or 硬编码) —— 先解析,以便 meta 事件携带 skill 信息
+    system_prompt: str = _SYSTEM_PROMPT
+    user_prompt: str = _build_user_prompt(overview, news or [], focus)
+    resolved_skill_id: str | None = None
+    resolved_skill_name: str | None = None
+    resolved_skill_params: dict = {}
     try:
         from app.services.ai_provider import stream_ai_text
 
@@ -307,12 +303,12 @@ async def recap_market_stream(
             logger.info("market_recap: [skill] entry, skill_id=%s, skill_params=%s", skill_id, skill_params)
             try:
                 skill = registry.get_skill(skill_id)
-                meta = skill.meta
+                skill_meta = skill.meta
                 logger.info(
                     "market_recap: [skill] lookup ok, id=%s, name=%s, category=%s, params_count=%d",
-                    meta.get("id"), meta.get("name"), meta.get("category"), len(meta.get("params", [])),
+                    skill_meta.get("id"), skill_meta.get("name"), skill_meta.get("category"), len(skill_meta.get("params", [])),
                 )
-                params = registry.validate_params(meta, skill_params)
+                params = registry.validate_params(skill_meta, skill_params)
                 logger.info("market_recap: [skill] validate ok, raw=%s, validated=%s", skill_params, params)
                 context = {"market_overview": overview, "news": news or [], "focus": focus}
                 logger.info(
@@ -320,6 +316,9 @@ async def recap_market_stream(
                     list(context.keys()), len(context["news"]), len(context["focus"]),
                 )
                 system_prompt, user_prompt = skill.run(params, context)
+                resolved_skill_id = skill_meta.get("id") or skill_id
+                resolved_skill_name = skill_meta.get("name")
+                resolved_skill_params = params
                 logger.info(
                     "market_recap: [skill] run ok, sys_len=%d, usr_len=%d",
                     len(system_prompt), len(user_prompt),
@@ -333,8 +332,18 @@ async def recap_market_stream(
                 user_prompt = _build_user_prompt(overview, news or [], focus)
         else:
             logger.info("market_recap: [skill] no skill_id provided, using default prompts")
-            system_prompt = _SYSTEM_PROMPT
-            user_prompt = _build_user_prompt(overview, news or [], focus)
+
+        # 2. meta 事件(前端据此先渲染信号灯/看板) —— 放在 skill 解析之后,携带 skill 字段
+        yield json.dumps({
+            "type": "meta",
+            "as_of": as_of_str,
+            "emotion_score": emo.get("score", 50),
+            "emotion_label": emo.get("label", "—"),
+            "summary": _recap_summary(overview),
+            "skill_id": resolved_skill_id,
+            "skill_name": resolved_skill_name,
+            "skill_params": resolved_skill_params,
+        }, ensure_ascii=False)
 
         async for delta in stream_ai_text(
             [
@@ -361,6 +370,8 @@ async def recap_market_once(
     as_of: date | None = None,
     focus: str = "",
     news: list[dict] | None = None,
+    skill_id: str | None = None,
+    skill_params: dict | None = None,
 ) -> tuple[str | None, dict]:
     """非流式版本(供定时任务调用):累积全部 delta,返回 (content, meta)。
 
@@ -369,7 +380,10 @@ async def recap_market_once(
     """
     content_parts: list[str] = []
     meta: dict = {"as_of": as_of.isoformat() if as_of else None}
-    async for evt in recap_market_stream(repo, quote_service, depth_service, as_of, focus, news):
+    async for evt in recap_market_stream(
+        repo, quote_service, depth_service, as_of, focus, news,
+        skill_id=skill_id, skill_params=skill_params,
+    ):
         try:
             obj = json.loads(evt)
         except Exception:  # noqa: BLE001

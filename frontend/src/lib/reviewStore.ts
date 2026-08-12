@@ -24,7 +24,7 @@ export interface ReviewMeta {
   as_of?: string
   emotion_score?: number
   emotion_label?: string
-  summary?: string
+  summary?: string | Record<string, any>
   // 持仓/交割单 tab 的 meta 字段
   count?: number
   total_market_value?: number
@@ -34,6 +34,10 @@ export interface ReviewMeta {
   sell_count?: number
   total_realized_pnl?: number
   records_count?: number
+  // Skill 信息(三 tab 通用)
+  skill_id?: string | null
+  skill_name?: string | null
+  skill_params?: Record<string, any> | null
 }
 
 export interface ReviewState {

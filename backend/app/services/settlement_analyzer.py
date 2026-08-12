@@ -407,32 +407,25 @@ async def analyze_settlement_stream(
     except Exception as e:  # noqa: BLE001
         logger.warning("[stream] stage3/5 position snapshot FAILED: %s (elapsed=%.1fms)", e, (_time.monotonic() - _t3) * 1000)
 
-    # ============ Stage 4/5: 组装 prompt + 发送 meta ============
+    # ============ Stage 4/5: 先解析 Skill 并组装 prompt,再 yield meta ============
     _t4 = _time.monotonic()
-    yield json.dumps({
-        "type": "meta",
-        "summary": {
-            "total_trades": stats.get("total_trades", 0),
-            "buy_count": stats.get("buy_count", 0),
-            "sell_count": stats.get("sell_count", 0),
-            "total_realized_pnl": stats.get("total_realized_pnl", 0),
-            "records_count": stats.get("records_count", 0),
-        },
-        "as_of": date.today().isoformat(),
-    }, ensure_ascii=False)
+    system_prompt: str = _SYSTEM_PROMPT
+    user_prompt: str = _build_settlement_user_prompt(stats, reconcile_ctx, position_summary, focus)
+    resolved_skill_id: str | None = None
+    resolved_skill_name: str | None = None
+    resolved_skill_params: dict = {}
 
-    # ============ Stage 4/5: 组装 prompt (Skill 委托 or 硬编码) ============
     if skill_id:
         from app.ai_skills import registry
         logger.info("[stream] stage4/5 [skill] entry, skill_id=%s, skill_params=%s", skill_id, skill_params)
         try:
             skill = registry.get_skill(skill_id)
-            meta = skill.meta
+            skill_meta = skill.meta
             logger.info(
                 "[stream] stage4/5 [skill] lookup ok, id=%s, name=%s, category=%s, params_count=%d",
-                meta.get("id"), meta.get("name"), meta.get("category"), len(meta.get("params", [])),
+                skill_meta.get("id"), skill_meta.get("name"), skill_meta.get("category"), len(skill_meta.get("params", [])),
             )
-            params = registry.validate_params(meta, skill_params)
+            params = registry.validate_params(skill_meta, skill_params)
             logger.info("[stream] stage4/5 [skill] validate ok, raw=%s, validated=%s", skill_params, params)
             context = {"stats": stats, "reconcile": reconcile_ctx, "position_summary": position_summary, "focus": focus}
             logger.info(
@@ -444,6 +437,9 @@ async def analyze_settlement_stream(
                 len(focus),
             )
             system_prompt, user_prompt = skill.run(params, context)
+            resolved_skill_id = skill_meta.get("id") or skill_id
+            resolved_skill_name = skill_meta.get("name")
+            resolved_skill_params = params
             logger.info(
                 "[stream] stage4/5 [skill] run ok, sys_len=%d, usr_len=%d",
                 len(system_prompt), len(user_prompt),
@@ -456,8 +452,22 @@ async def analyze_settlement_stream(
             system_prompt, user_prompt = _SYSTEM_PROMPT, _build_settlement_user_prompt(stats, reconcile_ctx, position_summary, focus)
     else:
         logger.info("[stream] stage4/5 [skill] no skill_id provided, using default prompts")
-        system_prompt = _SYSTEM_PROMPT
-        user_prompt = _build_settlement_user_prompt(stats, reconcile_ctx, position_summary, focus)
+
+    # meta 事件(skill 解析完成后发送,携带 skill 字段)
+    yield json.dumps({
+        "type": "meta",
+        "summary": {
+            "total_trades": stats.get("total_trades", 0),
+            "buy_count": stats.get("buy_count", 0),
+            "sell_count": stats.get("sell_count", 0),
+            "total_realized_pnl": stats.get("total_realized_pnl", 0),
+            "records_count": stats.get("records_count", 0),
+        },
+        "as_of": date.today().isoformat(),
+        "skill_id": resolved_skill_id,
+        "skill_name": resolved_skill_name,
+        "skill_params": resolved_skill_params,
+    }, ensure_ascii=False)
 
     logger.info(
         "[stream] stage4/5 done, prompt_len=%d, symbols=%d, anomalies=%d, position=%s (elapsed=%.1fms)",
@@ -512,3 +522,34 @@ async def analyze_settlement_stream(
         (_t4 - _t3) * 1000,
         (_t_end - _t4) * 1000,
     )
+
+
+async def analyze_settlement_once(
+    focus: str = "",
+    skill_id: str | None = None,
+    skill_params: dict | None = None,
+) -> tuple[str | None, dict]:
+    """非流式交割单分析 —— 供定时任务/推送等只需最终文本的调用方。
+
+    返回 (content, meta):content 为完整 Markdown,失败为 None;
+    meta 至少含 {"as_of", "summary"}。
+    """
+    content_parts: list[str] = []
+    meta: dict = {"as_of": date.today().isoformat()}
+    async for evt in analyze_settlement_stream(
+        focus, skill_id=skill_id, skill_params=skill_params,
+    ):
+        try:
+            obj = json.loads(evt)
+        except Exception:  # noqa: BLE001
+            continue
+        t = obj.get("type")
+        if t == "meta":
+            meta = obj
+        elif t == "delta":
+            content_parts.append(obj.get("content", ""))
+        elif t == "error":
+            logger.warning("settlement analyze error event: %s", obj.get("message"))
+            return None, meta
+    content = "".join(content_parts).strip()
+    return (content or None), meta

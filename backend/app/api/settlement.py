@@ -164,6 +164,20 @@ async def analyze_settlement(request: Request, req: AnalyzeRequest):
     """
     from app.services.settlement_analyzer import analyze_settlement_stream
 
+    # skill_id 预校验:不存在/类别不匹配直接 400,不静默 fallback
+    if req.skill_id:
+        from app.ai_skills import registry
+        try:
+            skill = registry.get_skill(req.skill_id)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        if skill.meta.get("category") != "settlement":
+            raise HTTPException(
+                400,
+                f"Skill {req.skill_id}(类别 {skill.meta.get('category')}) "
+                f"不适用于交割单分析,期望 category=settlement",
+            )
+
     async def stream_gen():
         from app.services import settlement_reports
 
@@ -193,6 +207,9 @@ async def analyze_settlement(request: Request, req: AnalyzeRequest):
                     "content": content,
                     "summary": meta.get("summary") or {},
                     "count": meta.get("summary", {}).get("records_count", 0),
+                    "skill_id": meta.get("skill_id"),
+                    "skill_name": meta.get("skill_name"),
+                    "skill_params": meta.get("skill_params") or {},
                 })
             except Exception as e:  # noqa: BLE001
                 logger.warning("auto-save settlement report failed: %s", e)

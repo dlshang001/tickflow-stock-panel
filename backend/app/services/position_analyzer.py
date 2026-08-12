@@ -824,18 +824,12 @@ async def analyze_positions_stream(
         len(settlement_ctx.get("reconcile_anomalies", [])),
     )
 
-    # 3. meta
-    logger.info("position_analyze: meta yield, count=%d", summary["count"])
-    yield json.dumps({
-        "type": "meta",
-        "count": summary["count"],
-        "summary": summary,
-        "concentration": concentration,
-        "sector_context": sector_context,
-        "as_of": date.today().isoformat(),
-    }, ensure_ascii=False)
-
-    # 4. 组装 prompt (Skill 委托 or 硬编码) + 流式 LLM
+    # 3+4. 先解析 Skill 并组装 prompt,再 yield meta(meta 携带 skill 信息)
+    system_prompt: str = _SYSTEM_PROMPT
+    user_prompt: str = _build_user_prompt(summary, holdings, market, concentration, sector_context, settlement_ctx, focus)
+    resolved_skill_id: str | None = None
+    resolved_skill_name: str | None = None
+    resolved_skill_params: dict = {}
     try:
         from app.services.ai_provider import stream_ai_text
 
@@ -844,12 +838,12 @@ async def analyze_positions_stream(
             logger.info("position_analyze: [skill] entry, skill_id=%s, skill_params=%s", skill_id, skill_params)
             try:
                 skill = registry.get_skill(skill_id)
-                meta = skill.meta
+                skill_meta = skill.meta
                 logger.info(
                     "position_analyze: [skill] lookup ok, id=%s, name=%s, category=%s, params_count=%d",
-                    meta.get("id"), meta.get("name"), meta.get("category"), len(meta.get("params", [])),
+                    skill_meta.get("id"), skill_meta.get("name"), skill_meta.get("category"), len(skill_meta.get("params", [])),
                 )
-                params = registry.validate_params(meta, skill_params)
+                params = registry.validate_params(skill_meta, skill_params)
                 logger.info("position_analyze: [skill] validate ok, raw=%s, validated=%s", skill_params, params)
                 context = {"summary": summary, "holdings": holdings, "market_snapshot": market, "concentration": concentration, "sector_context": sector_context, "settlement_ctx": settlement_ctx, "focus": focus}
                 logger.info(
@@ -859,6 +853,9 @@ async def analyze_positions_stream(
                     len(focus),
                 )
                 system_prompt, user_prompt = skill.run(params, context)
+                resolved_skill_id = skill_meta.get("id") or skill_id
+                resolved_skill_name = skill_meta.get("name")
+                resolved_skill_params = params
                 logger.info(
                     "position_analyze: [skill] run ok, sys_len=%d, usr_len=%d",
                     len(system_prompt), len(user_prompt),
@@ -872,8 +869,19 @@ async def analyze_positions_stream(
                 user_prompt = _build_user_prompt(summary, holdings, market, concentration, sector_context, settlement_ctx, focus)
         else:
             logger.info("position_analyze: [skill] no skill_id provided, using default prompts")
-            system_prompt = _SYSTEM_PROMPT
-            user_prompt = _build_user_prompt(summary, holdings, market, concentration, sector_context, settlement_ctx, focus)
+
+        logger.info("position_analyze: meta yield, count=%d, skill=%s", summary["count"], resolved_skill_id)
+        yield json.dumps({
+            "type": "meta",
+            "count": summary["count"],
+            "summary": summary,
+            "concentration": concentration,
+            "sector_context": sector_context,
+            "as_of": date.today().isoformat(),
+            "skill_id": resolved_skill_id,
+            "skill_name": resolved_skill_name,
+            "skill_params": resolved_skill_params,
+        }, ensure_ascii=False)
 
         logger.info(
             "position_analyze: llm start, prompt_len=%d, holdings=%d, focus=%s",
@@ -905,6 +913,8 @@ async def analyze_positions_once(
     quote_service,
     pos_rows: list[dict],
     focus: str = "",
+    skill_id: str | None = None,
+    skill_params: dict | None = None,
 ) -> tuple[str | None, dict]:
     """非流式持仓复盘 —— 供定时任务/推送等只需最终文本的调用方。
 
@@ -913,7 +923,10 @@ async def analyze_positions_once(
     """
     content_parts: list[str] = []
     meta: dict = {}
-    async for chunk in analyze_positions_stream(repo, quote_service, pos_rows, focus):
+    async for chunk in analyze_positions_stream(
+        repo, quote_service, pos_rows, focus,
+        skill_id=skill_id, skill_params=skill_params,
+    ):
         try:
             evt = json.loads(chunk)
         except Exception:  # noqa: BLE001

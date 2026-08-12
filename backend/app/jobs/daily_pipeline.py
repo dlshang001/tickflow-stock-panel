@@ -665,6 +665,7 @@ def _run_tracked(fn, job_label: str) -> None:
 
 REVIEW_JOB_ID = "scheduled_review"
 POSITION_REVIEW_JOB_ID = "scheduled_position_review"
+SETTLEMENT_REVIEW_JOB_ID = "scheduled_settlement_review"
 
 
 async def _run_scheduled_review(repo) -> None:
@@ -679,7 +680,7 @@ async def _run_scheduled_review(repo) -> None:
     import json
 
     try:
-        from app.services import market_recap_reports
+        from app.services import market_recap_reports, preferences
         from app import secrets_store as ss
 
         # AI Key 未配置时跳过(避免每日报错刷日志)
@@ -691,7 +692,15 @@ async def _run_scheduled_review(repo) -> None:
         quote_service = getattr(app_state, "quote_service", None) if app_state else None
         depth_service = getattr(app_state, "depth_service", None) if app_state else None
 
-        content, meta = await _stream_review_with_retry(repo, quote_service, depth_service)
+        default_skill = preferences.get_review_default_skill()
+        skill_id = default_skill.get("id")
+        skill_params = default_skill.get("params") or {}
+        logger.info("scheduled review start, skill_id=%s, params=%s", skill_id, skill_params)
+
+        content, meta = await _stream_review_with_retry(
+            repo, quote_service, depth_service,
+            skill_id=skill_id, skill_params=skill_params,
+        )
         if not content:
             logger.warning("scheduled review produced no content (meta=%s)", meta)
             # 通知前端进入 error 态(若有页面在听)
@@ -709,8 +718,11 @@ async def _run_scheduled_review(repo) -> None:
             "summary": meta.get("summary", ""),
             "emotion_score": meta.get("emotion_score"),
             "emotion_label": meta.get("emotion_label", ""),
+            "skill_id": meta.get("skill_id"),
+            "skill_name": meta.get("skill_name"),
+            "skill_params": meta.get("skill_params"),
         })
-        logger.info("scheduled review saved: as_of=%s", meta.get("as_of"))
+        logger.info("scheduled review saved: as_of=%s skill=%s", meta.get("as_of"), meta.get("skill_id"))
 
         # 通知前端: 生成完成且已归档(archived=true 让前端只刷新列表, 不重复归档)
         if quote_service:
@@ -735,11 +747,10 @@ async def _run_scheduled_review(repo) -> None:
             pass
 
 
-async def _stream_review_with_retry(repo, quote_service, depth_service) -> tuple[str, dict]:
+async def _stream_review_with_retry(repo, quote_service, depth_service, skill_id=None, skill_params=None) -> tuple[str, dict]:
     """流式生成复盘, 每个事件推 SSE + 累积内容。LLM 断流时最多重试 2 次。
 
     返回 (content, meta)。重试时推一个 retry 事件让前端清空已累积内容重新开始。
-    成功(收到 done/无 error)或耗尽重试后返回。
     """
     import asyncio
     import json
@@ -753,7 +764,10 @@ async def _stream_review_with_retry(repo, quote_service, depth_service) -> tuple
         content_parts = []  # 每次重试重新累积
         failed = False
         try:
-            async for evt_json in recap_market_stream(repo, quote_service, depth_service):
+            async for evt_json in recap_market_stream(
+                repo, quote_service, depth_service,
+                skill_id=skill_id, skill_params=skill_params,
+            ):
                 evt = json.loads(evt_json)
                 t = evt.get("type")
 
@@ -851,7 +865,7 @@ async def _run_scheduled_position_review(repo) -> None:
     任何异常吞掉只记日志,不影响调度器。
     """
     try:
-        from app.services import positions, position_reports
+        from app.services import positions, position_reports, preferences
         from app.services.position_analyzer import analyze_positions_once
         from app import secrets_store as ss
 
@@ -867,7 +881,17 @@ async def _run_scheduled_position_review(repo) -> None:
         app_state = _get_app_state()
         quote_service = getattr(app_state, "quote_service", None) if app_state else None
 
-        content, meta = await analyze_positions_once(repo, quote_service, pos_rows)
+        default_skill = preferences.get_position_default_skill()
+        skill_id = default_skill.get("id")
+        skill_params = default_skill.get("params") or {}
+        logger.info(
+            "scheduled position review start, skill_id=%s, params=%s",
+            skill_id, skill_params,
+        )
+        content, meta = await analyze_positions_once(
+            repo, quote_service, pos_rows,
+            focus="", skill_id=skill_id, skill_params=skill_params,
+        )
         if not content:
             logger.warning("scheduled position review produced no content")
             return
@@ -879,8 +903,11 @@ async def _run_scheduled_position_review(repo) -> None:
             "content": content,
             "summary": summary,
             "count": meta.get("count") or summary.get("count") or len(pos_rows),
+            "skill_id": meta.get("skill_id"),
+            "skill_name": meta.get("skill_name"),
+            "skill_params": meta.get("skill_params"),
         })
-        logger.info("scheduled position review saved: as_of=%s", meta.get("as_of"))
+        logger.info("scheduled position review saved: as_of=%s skill=%s", meta.get("as_of"), meta.get("skill_id"))
 
         _maybe_push_position_review(content, meta)
     except Exception as e:  # noqa: BLE001
@@ -936,6 +963,111 @@ def _register_position_review_job(scheduler, repo, hour: int, minute: int) -> No
                             hour=hour, minute=minute,
                             timezone="Asia/Shanghai"),
         id=POSITION_REVIEW_JOB_ID,
+        misfire_grace_time=7200,
+        replace_existing=True,
+    )
+
+
+async def _run_scheduled_settlement_review(repo) -> None:
+    """定时交割单分析:非流式生成 → 归档 → 推送。
+
+    无交割单或 AI Key 未配置时跳过。任何异常吞掉只记日志,不影响调度器。
+    """
+    try:
+        from app.services import settlement, settlement_reports, preferences
+        from app.services.settlement_analyzer import analyze_settlement_once
+        from app import secrets_store as ss
+
+        if not ss.get_ai_key():
+            logger.info("scheduled settlement review skipped: AI key not configured")
+            return
+
+        records = settlement.all_records()
+        if not records:
+            logger.info("scheduled settlement review skipped: no settlement records")
+            return
+
+        default_skill = preferences.get_settlement_default_skill()
+        skill_id = default_skill.get("id")
+        skill_params = default_skill.get("params") or {}
+        logger.info("scheduled settlement review start, skill_id=%s, params=%s", skill_id, skill_params)
+
+        content, meta = await analyze_settlement_once(
+            focus="", skill_id=skill_id, skill_params=skill_params,
+        )
+        if not content:
+            logger.warning("scheduled settlement review produced no content")
+            return
+
+        summary = meta.get("summary") or {}
+        settlement_reports.save_report({
+            "as_of": meta.get("as_of") or "",
+            "focus": "",
+            "content": content,
+            "summary": summary,
+            "count": summary.get("records_count", 0),
+            "skill_id": meta.get("skill_id"),
+            "skill_name": meta.get("skill_name"),
+            "skill_params": meta.get("skill_params"),
+        })
+        logger.info("scheduled settlement review saved: as_of=%s skill=%s", meta.get("as_of"), meta.get("skill_id"))
+
+        _maybe_push_settlement_review(content, meta)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("scheduled settlement review failed: %s", e)
+
+
+def _maybe_push_settlement_review(content: str, meta: dict) -> None:
+    """交割单分析归档后,按 settlement_review_push_channels 推送。失败静默降级。"""
+    try:
+        from app.services import preferences, webhook_adapter
+
+        channels = preferences.get_settlement_review_push_channels()
+        if not channels:
+            return
+
+        summary = meta.get("summary") or {}
+        as_of = meta.get("as_of") or ""
+        parts = []
+        if as_of:
+            parts.append(as_of)
+        if summary.get("total_trades"):
+            parts.append(f"{summary['total_trades']} 笔交易")
+        realized = summary.get("total_realized_pnl")
+        if realized is not None:
+            try:
+                parts.append(f"已实现盈亏 {float(realized):+,.0f}")
+            except (TypeError, ValueError):
+                pass
+        subtitle = " · ".join(parts)
+
+        for ch in channels:
+            if ch == "feishu":
+                url = preferences.get_feishu_webhook_url()
+                if not url:
+                    continue
+                secret = preferences.get_feishu_webhook_secret()
+                ok = webhook_adapter.send_feishu_card(url, "交割单分析", subtitle, content, secret)
+                logger.info("settlement review push(feishu) %s", "sent" if ok else "failed")
+            elif ch == "wecom":
+                url = preferences.get_wecom_webhook_url()
+                if not url:
+                    continue
+                full_body = (f"**{subtitle}**\n\n{content}" if subtitle else content)
+                ok = webhook_adapter.send_wecom_markdown(url, "交割单分析", full_body)
+                logger.info("settlement review push(wecom) %s", "sent" if ok else "failed")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("settlement review push error: %s", e)
+
+
+def _register_settlement_review_job(scheduler, hour: int, minute: int) -> None:
+    """注册/更新定时交割单分析 job(工作日 mon-fri, Asia/Shanghai)。"""
+    scheduler.add_job(
+        _run_scheduled_settlement_review,
+        trigger=CronTrigger(day_of_week="mon-fri",
+                            hour=hour, minute=minute,
+                            timezone="Asia/Shanghai"),
+        id=SETTLEMENT_REVIEW_JOB_ID,
         misfire_grace_time=7200,
         replace_existing=True,
     )
@@ -1091,6 +1223,13 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
         _register_position_review_job(scheduler, repo, pos_review_sched["hour"], pos_review_sched["minute"])
         logger.info("scheduled_position_review enabled @%02d:%02d mon-fri",
                     pos_review_sched["hour"], pos_review_sched["minute"])
+
+    # 定时交割单分析:默认关闭,用户在设置中开启。
+    set_review_sched = preferences.get_settlement_review_schedule()
+    if set_review_sched["enabled"]:
+        _register_settlement_review_job(scheduler, set_review_sched["hour"], set_review_sched["minute"])
+        logger.info("scheduled_settlement_review enabled @%02d:%02d mon-fri",
+                    set_review_sched["hour"], set_review_sched["minute"])
 
     scheduler.start()
     logger.info("scheduler started; instruments@%02d:%02d, pipeline@%02d:%02d, depth@%02d:%02d mon-fri",

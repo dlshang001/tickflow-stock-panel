@@ -301,6 +301,20 @@ async def analyze_positions(request: Request, req: AnalyzeRequest):
     """
     from app.services.position_analyzer import analyze_positions_stream
 
+    # skill_id 预校验:不存在/类别不匹配直接 400,不静默 fallback
+    if req.skill_id:
+        from app.ai_skills import registry
+        try:
+            skill = registry.get_skill(req.skill_id)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        if skill.meta.get("category") != "holdings":
+            raise HTTPException(
+                400,
+                f"Skill {req.skill_id}(类别 {skill.meta.get('category')}) "
+                f"不适用于持仓分析,期望 category=holdings",
+            )
+
     repo = request.app.state.repo
     quote_service = getattr(request.app.state, "quote_service", None)
     pos_rows = positions.list_rows()
@@ -337,6 +351,9 @@ async def analyze_positions(request: Request, req: AnalyzeRequest):
                     "content": content,
                     "summary": summary,
                     "count": meta.get("count") or summary.get("count") or len(pos_rows),
+                    "skill_id": meta.get("skill_id"),
+                    "skill_name": meta.get("skill_name"),
+                    "skill_params": meta.get("skill_params") or {},
                 })
             except Exception as e:  # noqa: BLE001
                 logger.warning("auto-save position report failed: %s", e)

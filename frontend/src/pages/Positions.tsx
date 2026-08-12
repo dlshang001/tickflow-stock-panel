@@ -1,7 +1,7 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Trash2, Sparkles, X, Copy, RefreshCw, History, CalendarClock, Plus, Settings2, TrendingDown, Eraser, Check } from 'lucide-react'
+import { Trash2, Sparkles, X, Copy, RefreshCw, History, CalendarClock, Plus, Settings2, TrendingDown, Eraser } from 'lucide-react'
 import { api, type KlineRow, type MinuteKlineRow } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
 import { fmtPrice, priceColorClass, fmtBigNum } from '@/lib/format'
@@ -235,31 +235,11 @@ export function Positions() {
   }
 
   // ===== 定时复盘设置 =====
+  // 定时持仓分析的设置入口已统一到 Review 页面(/review?tab=holdings),
+  // 此处仅展示当前调度状态,点击按钮跳转过去编辑,避免双份 UI。
   const prefs = usePreferences()
   const posSched = prefs.data?.position_review_schedule ?? { enabled: false, hour: 15, minute: 15 }
-  const posPushChannels = prefs.data?.position_review_push_channels ?? []
-  const feishuConfigured = !!(prefs.data?.feishu_webhook_url)
-  const wecomConfigured = !!(prefs.data?.wecom_webhook_url)
-  const [scheduleOpen, setScheduleOpen] = useState(false)
-  const [schedDraft, setSchedDraft] = useState<{ enabled: boolean; hour: number; minute: number }>(posSched)
-  const openSchedule = () => { setSchedDraft(posSched); setScheduleOpen(true) }
-  const schedMut = useMutation({
-    mutationFn: (v: { enabled: boolean; hour: number; minute: number }) =>
-      api.updatePositionReviewSchedule(v.enabled, v.hour, v.minute),
-    onSuccess: (_d, v) => {
-      qc.invalidateQueries({ queryKey: QK.preferences })
-      setScheduleOpen(false)
-      toast(v.enabled ? '已开启每日持仓复盘' : '已关闭每日持仓复盘', 'success')
-    },
-  })
-  const pushMut = useMutation({
-    mutationFn: (channels: string[]) => api.updatePositionReviewPush(channels),
-    onSuccess: () => qc.invalidateQueries({ queryKey: QK.preferences }),
-  })
-  const togglePush = (ch: string) => {
-    const next = posPushChannels.includes(ch) ? posPushChannels.filter((c: string) => c !== ch) : [...posPushChannels, ch]
-    pushMut.mutate(next)
-  }
+
 
   const runAiReview = async (focus = '') => {
     // settlement/reconcile 模式使用独立的交割单分析 skill
@@ -472,14 +452,14 @@ export function Positions() {
               <Sparkles className="h-3.5 w-3.5" /> AI 复盘
             </button>
             <button
-              onClick={openSchedule}
+              onClick={() => navigate('/review?tab=holdings')}
               className={cn(
                 "inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border text-xs transition-colors",
                 posSched.enabled
                   ? "border-violet-400/50 text-violet-300 bg-violet-500/10"
                   : "border-border text-secondary hover:text-foreground",
               )}
-              title="每日收盘自动持仓复盘与推送设置"
+              title={posSched.enabled ? `定时持仓分析已开启 · 每日 ${String(posSched.hour).padStart(2, '0')}:${String(posSched.minute).padStart(2, '0')} · 点击前往复盘页管理` : '前往复盘页管理定时持仓分析设置'}
             >
               <CalendarClock className="h-3.5 w-3.5" />
               {posSched.enabled ? `定时 ${String(posSched.hour).padStart(2, '0')}:${String(posSched.minute).padStart(2, '0')}` : '定时复盘'}
@@ -618,89 +598,6 @@ export function Positions() {
         title="自定义列"
         showExtColumns={false}
       />
-
-      {scheduleOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => !schedMut.isPending && setScheduleOpen(false)} />
-          <div className="relative w-full max-w-md rounded-card border border-border bg-base shadow-2xl">
-            <div className="flex items-center justify-between px-5 py-3.5 border-b border-border">
-              <div className="flex items-center gap-2">
-                <CalendarClock className="h-4 w-4 text-violet-400" />
-                <span className="text-sm font-medium text-foreground">每日持仓复盘</span>
-              </div>
-              <button className="p-1 text-muted hover:text-foreground" onClick={() => setScheduleOpen(false)}><X className="h-4 w-4" /></button>
-            </div>
-            <div className="px-5 py-4 space-y-4">
-              <label className="flex items-center justify-between cursor-pointer">
-                <div>
-                  <div className="text-sm text-foreground">启用每日自动复盘</div>
-                  <div className="text-[11px] text-muted mt-0.5">交易日收盘后自动生成持仓复盘并归档</div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setSchedDraft(d => ({ ...d, enabled: !d.enabled }))}
-                  className={cn("relative h-5 w-9 rounded-full transition-colors", schedDraft.enabled ? "bg-violet-500" : "bg-border")}
-                >
-                  <span className={cn("absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform", schedDraft.enabled ? "translate-x-4" : "translate-x-0.5")} />
-                </button>
-              </label>
-
-              {schedDraft.enabled && (
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-secondary">触发时间</span>
-                  <select
-                    value={schedDraft.hour}
-                    onChange={e => setSchedDraft(d => ({ ...d, hour: Number(e.target.value) }))}
-                    className="h-8 rounded-md border border-border bg-elevated px-2 text-xs text-foreground"
-                  >
-                    {Array.from({ length: 9 }, (_, i) => i + 15).map(h => <option key={h} value={h}>{String(h).padStart(2, '0')}</option>)}
-                  </select>
-                  <span className="text-xs text-muted">:</span>
-                  <select
-                    value={schedDraft.minute}
-                    onChange={e => setSchedDraft(d => ({ ...d, minute: Number(e.target.value) }))}
-                    className="h-8 rounded-md border border-border bg-elevated px-2 text-xs text-foreground"
-                  >
-                    {[0, 5, 10, 15, 20, 30, 45].map(m => <option key={m} value={m}>{String(m).padStart(2, '0')}</option>)}
-                  </select>
-                  <span className="text-[11px] text-muted">收盘后(≥15:00)</span>
-                </div>
-              )}
-
-              <div className="border-t border-border pt-3">
-                <div className="text-xs text-secondary mb-2">复盘后推送到</div>
-                <div className="space-y-2">
-                  {[
-                    { id: 'feishu', label: '飞书', configured: feishuConfigured },
-                    { id: 'wecom', label: '企业微信', configured: wecomConfigured },
-                  ].map(ch => {
-                    const on = posPushChannels.includes(ch.id)
-                    return (
-                      <label key={ch.id} className="flex items-center gap-2 cursor-pointer" onClick={() => togglePush(ch.id)}>
-                        <span className={cn("flex h-4 w-4 items-center justify-center rounded border", on ? "border-violet-500 bg-violet-500 text-white" : "border-border")}>
-                          {on && <Check className="h-3 w-3" />}
-                        </span>
-                        <span className="text-xs text-foreground">{ch.label}</span>
-                        {!ch.configured && <span className="text-[10px] text-muted">(未配置 webhook)</span>}
-                      </label>
-                    )
-                  })}
-                </div>
-              </div>
-            </div>
-            <div className="flex justify-end gap-2 px-5 py-3 border-t border-border">
-              <button className="h-8 px-3 rounded-lg border border-border text-xs text-secondary hover:text-foreground" onClick={() => setScheduleOpen(false)}>取消</button>
-              <button
-                className="h-8 px-4 rounded-lg bg-violet-500 text-white text-xs font-medium hover:bg-violet-500/90 disabled:opacity-50"
-                disabled={schedMut.isPending}
-                onClick={() => schedMut.mutate({ enabled: schedDraft.enabled, hour: schedDraft.hour, minute: schedDraft.minute })}
-              >
-                {schedMut.isPending ? '保存中…' : '保存'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       <StockPreviewDialog
         symbol={previewSymbol}

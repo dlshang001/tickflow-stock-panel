@@ -649,6 +649,10 @@ export interface AiReviewReport {
   emotion_score?: number | null
   emotion_label?: string
   created_at: string
+  // 生成时使用的 Skill 信息(null = 走硬编码默认 prompt);老报告缺字段时由后端补 null
+  skill_id?: string | null
+  skill_name?: string | null
+  skill_params?: Record<string, any> | null
 }
 
 // ===== Strategy Engine =====
@@ -1220,6 +1224,8 @@ export interface Preferences {
   review_push_channels: string[]
   position_review_schedule: { enabled: boolean; hour: number; minute: number }
   position_review_push_channels: string[]
+  settlement_review_schedule: { enabled: boolean; hour: number; minute: number }
+  settlement_review_push_channels: string[]
   sse_refresh_pages: Record<string, boolean>
   strategy_monitor_enabled: boolean
   strategy_monitor_ids: string[]
@@ -1522,6 +1528,16 @@ export const api = {
     }),
   updatePositionReviewPush: (channels: string[]) =>
     request<{ position_review_push_channels: string[] }>('/api/settings/preferences/position-review-push', {
+      method: 'PUT',
+      body: JSON.stringify({ channels }),
+    }),
+  updateSettlementReviewSchedule: (enabled: boolean, hour: number, minute: number) =>
+    request<{ enabled: boolean; hour: number; minute: number }>('/api/settings/preferences/settlement-review-schedule', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled, hour, minute }),
+    }),
+  updateSettlementReviewPush: (channels: string[]) =>
+    request<{ settlement_review_push_channels: string[] }>('/api/settings/preferences/settlement-review-push', {
       method: 'PUT',
       body: JSON.stringify({ channels }),
     }),
@@ -2396,6 +2412,7 @@ export const api = {
   reviewReportSave: (r: {
     as_of: string; focus?: string; content: string
     summary?: string; emotion_score?: number | null; emotion_label?: string
+    skill_id?: string | null; skill_name?: string | null; skill_params?: Record<string, any> | null
   }) =>
     request<{ ok: boolean; report: AiReviewReport }>('/api/market-recap/reports', {
       method: 'POST', body: JSON.stringify(r),

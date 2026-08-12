@@ -30,7 +30,7 @@ import { usePreferences } from '@/lib/useSharedQueries'
 import { useReviewState } from '@/lib/useReviewStore'
 import {
   startGeneration, resetTab, isTabGenerating,
-  type ReviewTab, type ReviewPhase,
+  type ReviewTab, type ReviewPhase, type ReviewMeta,
 } from '@/lib/reviewStore'
 import { getSkillState } from '@/lib/aiSkillStore'
 import { SkillSelector } from '@/components/review/SkillSelector'
@@ -143,6 +143,22 @@ export function Review() {
   const [skillParamsOpen, setSkillParamsOpen] = useState(false)
   const reportEndRef = useRef<HTMLDivElement>(null)
 
+  // 查看历史报告时,顶部摘要条 / meta 信息跟随 viewing(而不是当前流)。
+  // 老报告可能没有 skill_* 字段,用 ?? 兜底,不覆盖 storeMeta 已有的字段。
+  const displayMeta: any = viewing
+    ? {
+        ...meta,
+        ...viewing,
+        summary: viewing.summary ?? meta?.summary,
+        emotion_score: viewing.emotion_score ?? meta?.emotion_score,
+        emotion_label: viewing.emotion_label ?? meta?.emotion_label,
+        count: viewing.count ?? meta?.count,
+        skill_id: viewing.skill_id ?? meta?.skill_id ?? null,
+        skill_name: viewing.skill_name ?? meta?.skill_name ?? null,
+        skill_params: viewing.skill_params ?? meta?.skill_params ?? {},
+      }
+    : meta
+
   // 切换 tab 时清掉 viewing(避免上一个 tab 的历史报告内容残留到新 tab 主区域)
   useEffect(() => {
     setViewing(null)
@@ -225,46 +241,82 @@ export function Review() {
   }, [activeTab, marketQuery, qc])
   const refreshFetching = activeTab === 'market' ? marketQuery.isFetching : false
 
-  // ===== 定时复盘(仅 market tab)=====
+  // ===== 定时复盘(三 tab 独立配置) =====
   const [showSchedule, setShowSchedule] = useState(false)
+  const [scheduleTab, setScheduleTab] = useState<ReviewTab>('market')
   const prefs = usePreferences()
   const reviewSched = prefs.data?.review_schedule ?? { enabled: false, hour: 15, minute: 10 }
+  const posReviewSched = prefs.data?.position_review_schedule ?? { enabled: false, hour: 15, minute: 15 }
+  const setReviewSched = prefs.data?.settlement_review_schedule ?? { enabled: false, hour: 15, minute: 40 }
   const feishuConfigured = !!(prefs.data?.feishu_webhook_url)
   const wecomConfigured = !!(prefs.data?.wecom_webhook_url)
-  // 推送渠道是独立的顶层偏好(多选), 与定时 / 实时行情无关, 常驻可单独设置
-  // []=不推送, ['feishu']=飞书, ['wecom']=企业微信
+  // 各 tab 推送渠道(独立多选,与定时开关解耦)
   const reviewPushChannels = prefs.data?.review_push_channels ?? []
-  // 弹窗内的本地草稿: 开关和时间都在本地改, 点「保存」才真正提交(避免开关一拨就关弹窗)
-  const [draft, setDraft] = useState(reviewSched)
+  const posReviewPushChannels = prefs.data?.position_review_push_channels ?? []
+  const setReviewPushChannels = prefs.data?.settlement_review_push_channels ?? []
+
+  // 各 tab 独立草稿(开关+时间),切换 tab 不串扰
+  const [draftMarket, setDraftMarket] = useState(reviewSched)
+  const [draftHoldings, setDraftHoldings] = useState(posReviewSched)
+  const [draftSettlement, setDraftSettlement] = useState(setReviewSched)
+  const draftFor = (t: ReviewTab) =>
+    t === 'market' ? draftMarket : t === 'holdings' ? draftHoldings : draftSettlement
+  const setDraftFor = (t: ReviewTab, patch: Partial<{ enabled: boolean; hour: number; minute: number }>) => {
+    if (t === 'market') setDraftMarket((d: { enabled: boolean; hour: number; minute: number }) => ({ ...d, ...patch }))
+    else if (t === 'holdings') setDraftHoldings((d: { enabled: boolean; hour: number; minute: number }) => ({ ...d, ...patch }))
+    else setDraftSettlement((d: { enabled: boolean; hour: number; minute: number }) => ({ ...d, ...patch }))
+  }
+  const schedFor = (t: ReviewTab) =>
+    t === 'market' ? reviewSched : t === 'holdings' ? posReviewSched : setReviewSched
+
   const openSchedule = useCallback(() => {
-    setDraft(reviewSched)  // 每次打开同步最新服务端值
+    // 每次打开同步最新服务端值,并默认定位到当前 activeTab
+    setDraftMarket(reviewSched)
+    setDraftHoldings(posReviewSched)
+    setDraftSettlement(setReviewSched)
+    setScheduleTab(activeTab)
     setShowSchedule(true)
-  }, [reviewSched])
+  }, [reviewSched, posReviewSched, setReviewSched, activeTab])
+
   const reviewMut = useMutation({
-    mutationFn: ({ enabled, hour, minute }: { enabled: boolean; hour: number; minute: number }) =>
-      api.updateReviewSchedule(enabled, hour, minute),
+    mutationFn: ({ tab, enabled, hour, minute }: { tab: ReviewTab; enabled: boolean; hour: number; minute: number }) => {
+      if (tab === 'market') return api.updateReviewSchedule(enabled, hour, minute)
+      if (tab === 'holdings') return api.updatePositionReviewSchedule(enabled, hour, minute)
+      return api.updateSettlementReviewSchedule(enabled, hour, minute)
+    },
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: QK.preferences })
       setShowSchedule(false)
-      toast(vars.enabled ? '已开启定时复盘' : '已关闭定时复盘', 'success')
+      const label = vars.tab === 'market' ? '复盘' : vars.tab === 'holdings' ? '持仓分析' : '交割单分析'
+      toast(vars.enabled ? `已开启定时${label}` : `已关闭定时${label}`, 'success')
     },
     onError: () => { /* request() 已 toast */ },
   })
-  // 推送渠道(多选): 独立常驻, 即时生效(勾选渠道即开关, 改了立刻提交)
+
   const pushMut = useMutation({
-    mutationFn: (channels: string[]) => api.updateReviewPush(channels),
+    mutationFn: ({ tab, channels }: { tab: ReviewTab; channels: string[] }): Promise<Record<string, string[]>> => {
+      if (tab === 'market') return api.updateReviewPush(channels)
+      if (tab === 'holdings') return api.updatePositionReviewPush(channels)
+      return api.updateSettlementReviewPush(channels)
+    },
     onSuccess: (_data, vars) => {
       qc.invalidateQueries({ queryKey: QK.preferences })
-      toast(vars.length === 0 ? '已关闭复盘推送' : '已更新复盘推送渠道', 'success')
+      toast(vars.channels.length === 0 ? '已关闭推送' : '已更新推送渠道', 'success')
     },
     onError: () => { /* request() 已 toast */ },
   })
-  const togglePushChannel = useCallback((ch: string) => {
-    const next = reviewPushChannels.includes(ch)
-      ? reviewPushChannels.filter(c => c !== ch)
-      : [...reviewPushChannels, ch]
-    pushMut.mutate(next)
-  }, [reviewPushChannels, pushMut])
+  const pushChannelsFor = (t: ReviewTab) =>
+    t === 'market' ? reviewPushChannels : t === 'holdings' ? posReviewPushChannels : setReviewPushChannels
+  const togglePushChannel = useCallback((tab: ReviewTab, ch: string) => {
+    const current = pushChannelsFor(tab)
+    const next = current.includes(ch) ? current.filter((c: string) => c !== ch) : [...current, ch]
+    pushMut.mutate({ tab, channels: next })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reviewPushChannels, posReviewPushChannels, setReviewPushChannels, pushMut])
+
+  // 顶部"定时"按钮的激活态/标题(按当前 activeTab)
+  const activeSched = schedFor(activeTab)
+
 
   // 自动滚动到报告底部(streaming 时)
   useEffect(() => {
@@ -285,16 +337,21 @@ export function Review() {
   // 自动归档(生成完成后台静默保存)—— 仅 market tab 需要,
   // 通过回调注入 store,避免 store 直接依赖 qc/marketQuery。
   // holdings / settlement tab 由后端自动归档,无需前端再调保存接口。
-  const onGenerationDone = useCallback(async (fullContent: string, doneMeta: { as_of?: string; summary?: string; emotion_score?: number; emotion_label?: string } | null) => {
+  const onGenerationDone = useCallback(async (fullContent: string, doneMeta: ReviewMeta | null) => {
     const reportAsOf = doneMeta?.as_of ?? marketQuery.data?.as_of ?? asOf ?? new Date().toISOString().slice(0, 10)
+    // market tab 的 summary 恒为字符串;holdings/settlement 的 dict 结构不会进入此回调(后端自动归档)
+    const summaryStr = typeof doneMeta?.summary === 'string' ? doneMeta.summary : undefined
     try {
       await api.reviewReportSave({
         as_of: reportAsOf,
         focus,
         content: fullContent,
-        summary: doneMeta?.summary,
+        summary: summaryStr,
         emotion_score: doneMeta?.emotion_score ?? null,
         emotion_label: doneMeta?.emotion_label ?? '',
+        skill_id: doneMeta?.skill_id ?? null,
+        skill_name: doneMeta?.skill_name ?? null,
+        skill_params: doneMeta?.skill_params ?? null,
       })
       qc.invalidateQueries({ queryKey: QK.reviewReports })
     } catch { /* 静默 */ }
@@ -335,7 +392,7 @@ export function Review() {
   const downloadContent = useCallback(() => {
     const text = viewing?.content ?? content
     if (!text) return
-    const reportDate = viewing?.as_of ?? meta?.as_of ?? asOf ?? new Date().toISOString().slice(0, 10)
+    const reportDate = viewing?.as_of ?? displayMeta?.as_of ?? asOf ?? new Date().toISOString().slice(0, 10)
     const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -352,7 +409,7 @@ export function Review() {
   }, [])
 
   const isGenerating = phase === 'loading' || phase === 'streaming'
-  const displayDate = viewing?.as_of ?? meta?.as_of ?? (activeTab === 'market' ? marketQuery.data?.as_of : undefined) ?? asOf ?? '最新'
+  const displayDate = viewing?.as_of ?? displayMeta?.as_of ?? (activeTab === 'market' ? marketQuery.data?.as_of : undefined) ?? asOf ?? '最新'
   const marketData = marketQuery.data
   // 主区域显示的内容:viewing(查看历史)优先于 store 的生成 content,
   // 这样点历史报告不会覆盖后台生成中的流。
@@ -377,25 +434,23 @@ export function Review() {
             <button
               onClick={refreshData}
               disabled={refreshFetching}
-              className="inline-flex items-center gap-1 rounded-btn border border-border bg-elevated px-2 py-1 text-[11px] text-secondary transition-colors hover:text-foreground disabled:opacity-50"
+              className="inline-flex items-center gap-1 rounded-btn border border-border bg-elevated px-2 py-1 text-sm text-secondary transition-colors hover:text-foreground disabled:opacity-50"
               title="刷新数据"
             >
-              <RefreshCw className={cn('h-3 w-3', refreshFetching && 'animate-spin')} />刷新
+              <RefreshCw className={cn('h-3.5 w-3.5', refreshFetching && 'animate-spin')} />刷新
             </button>
-            {activeTab === 'market' && (
-              <button
-                onClick={openSchedule}
-                className={cn(
-                  'inline-flex items-center gap-1 rounded-btn border px-2 py-1 text-[11px] transition-colors',
-                  reviewSched.enabled
-                    ? 'border-accent/40 bg-accent/10 text-accent hover:bg-accent/20'
-                    : 'border-border bg-elevated text-secondary hover:text-foreground',
-                )}
-                title={reviewSched.enabled ? `定时复盘已开启 · 每日 ${String(reviewSched.hour).padStart(2,'0')}:${String(reviewSched.minute).padStart(2,'0')}` : '定时复盘'}
-              >
-                <Clock className="h-3 w-3" />定时
-              </button>
-            )}
+            <button
+              onClick={openSchedule}
+              className={cn(
+                'inline-flex items-center gap-1 rounded-btn border px-2 py-1 text-sm transition-colors',
+                activeSched.enabled
+                  ? 'border-accent/40 bg-accent/10 text-accent hover:bg-accent/20'
+                  : 'border-border bg-elevated text-secondary hover:text-foreground',
+              )}
+              title={activeSched.enabled ? `定时${TAB_CONFIG[activeTab].label}已开启 · 每日 ${String(activeSched.hour).padStart(2,'0')}:${String(activeSched.minute).padStart(2,'0')}` : `定时${TAB_CONFIG[activeTab].label}`}
+            >
+              <Clock className="h-3.5 w-3.5" />定时
+            </button>
             <button
               onClick={generate}
               disabled={isGenerating}
@@ -530,7 +585,7 @@ export function Review() {
         </div>
       </div>
 
-      {/* ===== 定时复盘设置弹窗(仅 market tab 使用)===== */}
+      {/* ===== 定时复盘设置弹窗(三 tab 独立配置)===== */}
       <AnimatePresence>
         {showSchedule && (
           <motion.div
@@ -550,7 +605,7 @@ export function Review() {
               <div className="mb-4 flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <Clock className="h-4 w-4 text-accent" />
-                  <h3 className="text-sm font-medium text-foreground">定时复盘</h3>
+                  <h3 className="text-sm font-medium text-foreground">定时复盘设置</h3>
                 </div>
                 <button
                   onClick={() => setShowSchedule(false)}
@@ -560,129 +615,153 @@ export function Review() {
                 </button>
               </div>
 
-              <p className="mb-4 text-[11px] leading-relaxed text-muted">
-                开启后,每个交易日到点自动生成大盘复盘报告并归档,静默执行。
-                下次打开本页即可在历史列表看到新报告;也可选推送到飞书。
-              </p>
-
-              {/* 开关(只改本地草稿, 不提交) */}
-              <label className="flex items-center justify-between rounded-btn bg-elevated/40 px-3 py-2.5">
-                <span className="text-xs text-foreground">启用定时复盘</span>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={draft.enabled}
-                  onClick={() => setDraft(d => ({ ...d, enabled: !d.enabled }))}
-                  className={cn(
-                    'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors',
-                    draft.enabled ? 'bg-accent' : 'bg-border',
-                  )}
-                >
-                  <span className={cn('inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform', draft.enabled ? 'translate-x-[18px]' : 'translate-x-1')} />
-                </button>
-              </label>
-
-              {/* 时间设置(仅开启时可编辑, 本地草稿) */}
-              {draft.enabled && (
-                <div className="mt-3 flex items-center gap-2 rounded-btn bg-elevated/40 px-3 py-2.5">
-                  <span className="text-[11px] text-muted">每日</span>
-                  <input
-                    type="number" min={0} max={23} value={draft.hour}
-                    onChange={e => setDraft(d => ({ ...d, hour: Math.max(0, Math.min(23, Number(e.target.value))) }))}
-                    className="w-12 px-1.5 py-1 rounded-btn bg-base border border-border text-xs font-mono text-foreground text-center focus:outline-none focus:border-accent/50"
-                  />
-                  <span className="text-xs text-muted">:</span>
-                  <input
-                    type="number" min={0} max={59} value={draft.minute}
-                    onChange={e => setDraft(d => ({ ...d, minute: Math.max(0, Math.min(59, Number(e.target.value))) }))}
-                    className="w-12 px-1.5 py-1 rounded-btn bg-base border border-border text-xs font-mono text-foreground text-center focus:outline-none focus:border-accent/50"
-                  />
-                  <span className="text-[10px] text-muted/70">不早于 15:00 · 工作日执行</span>
-                </div>
-              )}
-
-              {/* 推送渠道(多选, 独立常驻, 与定时无关, 即时生效) */}
-              <div className="mt-3 rounded-btn bg-elevated/40 px-3 py-2.5">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs text-foreground">生成后推送完整报告</span>
-                  <span className="text-[10px] text-muted/70">{reviewPushChannels.length === 0 ? '未开启' : `${reviewPushChannels.length} 个渠道`}</span>
-                </div>
-                <div className="mt-2 space-y-1.5">
-                  {/* 飞书(可用, 多选) */}
+              {/* 类型切换器:大盘 / 持仓 / 交割单 */}
+              <div className="mb-4 grid grid-cols-3 gap-1 rounded-btn bg-elevated/50 p-1">
+                {(['market', 'holdings', 'settlement'] as ReviewTab[]).map(t => (
                   <button
-                    type="button"
-                    disabled={pushMut.isPending}
-                    onClick={() => togglePushChannel('feishu')}
+                    key={t}
+                    onClick={() => setScheduleTab(t)}
                     className={cn(
-                      'flex w-full items-center gap-2 rounded-btn border px-2.5 py-1.5 text-left transition-colors disabled:opacity-50',
-                      reviewPushChannels.includes('feishu')
-                        ? 'border-accent/40 bg-accent/10'
-                        : 'border-border/60 bg-base/40 hover:bg-base/60',
+                      'flex items-center justify-center gap-1 rounded px-2 py-1.5 text-sm font-medium transition-colors',
+                      scheduleTab === t ? 'bg-surface text-accent shadow-sm' : 'text-muted hover:text-foreground',
                     )}
                   >
-                    <span className={cn('flex h-3 w-3 shrink-0 items-center justify-center rounded border', reviewPushChannels.includes('feishu') ? 'border-accent bg-accent text-white' : 'border-border')}>
-                      {reviewPushChannels.includes('feishu') && <Check className="h-2.5 w-2.5" />}
-                    </span>
-                    <span className="text-[11px] text-foreground">飞书</span>
-                    <span className="text-[9px] text-muted">群推送 Webhook</span>
-                    <span className={cn('ml-auto text-[9px]', feishuConfigured ? 'text-emerald-500' : 'text-warning')}>
-                      {feishuConfigured ? '已配置' : '未配置'}
-                    </span>
+                    {TAB_CONFIG[t].icon}
+                    {TAB_CONFIG[t].label.replace('复盘', '').replace('分析', '')}
                   </button>
-                  {/* 企业微信(可用, 多选) */}
-                  <button
-                    type="button"
-                    disabled={pushMut.isPending}
-                    onClick={() => togglePushChannel('wecom')}
-                    className={cn(
-                      'flex w-full items-center gap-2 rounded-btn border px-2.5 py-1.5 text-left transition-colors disabled:opacity-50',
-                      reviewPushChannels.includes('wecom')
-                        ? 'border-accent/40 bg-accent/10'
-                        : 'border-border/60 bg-base/40 hover:bg-base/60',
+                ))}
+              </div>
+
+              {(() => {
+                const d = draftFor(scheduleTab)
+                const channels = pushChannelsFor(scheduleTab)
+                const tabLabel = TAB_CONFIG[scheduleTab].label
+                return (
+                  <>
+                    <p className="mb-4 text-sm leading-relaxed text-muted">
+                      开启后,每个交易日到点自动生成{scheduleTab === 'market' ? '大盘复盘' : scheduleTab === 'holdings' ? '持仓分析' : '交割单分析'}报告并归档,静默执行。
+                      下次打开本页即可在历史列表看到新报告;也可选推送到飞书/企业微信。
+                    </p>
+
+                    {/* 开关(只改本地草稿) */}
+                    <label className="flex items-center justify-between rounded-btn bg-elevated/40 px-3 py-2.5">
+                      <span className="text-sm text-foreground">启用定时{tabLabel}</span>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={d.enabled}
+                        onClick={() => setDraftFor(scheduleTab, { enabled: !d.enabled })}
+                        className={cn(
+                          'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors',
+                          d.enabled ? 'bg-accent' : 'bg-border',
+                        )}
+                      >
+                        <span className={cn('inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform', d.enabled ? 'translate-x-[18px]' : 'translate-x-1')} />
+                      </button>
+                    </label>
+
+                    {/* 时间设置(仅开启时可编辑) */}
+                    {d.enabled && (
+                      <div className="mt-3 flex items-center gap-2 rounded-btn bg-elevated/40 px-3 py-2.5">
+                        <span className="text-sm text-muted">每日</span>
+                        <input
+                          type="number" min={0} max={23} value={d.hour}
+                          onChange={e => setDraftFor(scheduleTab, { hour: Math.max(0, Math.min(23, Number(e.target.value))) })}
+                          className="w-12 px-1.5 py-1 rounded-btn bg-base border border-border text-xs font-mono text-foreground text-center focus:outline-none focus:border-accent/50"
+                        />
+                        <span className="text-sm text-muted">:</span>
+                        <input
+                          type="number" min={0} max={59} value={d.minute}
+                          onChange={e => setDraftFor(scheduleTab, { minute: Math.max(0, Math.min(59, Number(e.target.value))) })}
+                          className="w-12 px-1.5 py-1 rounded-btn bg-base border border-border text-xs font-mono text-foreground text-center focus:outline-none focus:border-accent/50"
+                        />
+                        <span className="text-sm text-muted/70">不早于 15:00 · 工作日执行</span>
+                      </div>
                     )}
-                  >
-                    <span className={cn('flex h-3 w-3 shrink-0 items-center justify-center rounded border', reviewPushChannels.includes('wecom') ? 'border-accent bg-accent text-white' : 'border-border')}>
-                      {reviewPushChannels.includes('wecom') && <Check className="h-2.5 w-2.5" />}
-                    </span>
-                    <span className="text-[11px] text-foreground">企业微信</span>
-                    <span className="text-[9px] text-muted">群推送 Webhook</span>
-                    <span className={cn('ml-auto text-[9px]', wecomConfigured ? 'text-emerald-500' : 'text-warning')}>
-                      {wecomConfigured ? '已配置' : '未配置'}
-                    </span>
-                  </button>
-                </div>
-                <p className="mt-1.5 text-[10px] leading-relaxed text-muted/70">
-                  手动或定时生成的复盘都会推送完整报告。复用「设置 → 实时监控」的 Webhook 配置。
-                  {((reviewPushChannels.includes('feishu') && !feishuConfigured) || (reviewPushChannels.includes('wecom') && !wecomConfigured)) && (
-                    <Link to="/settings?tab=monitoring" className="ml-1 text-accent hover:underline" onClick={() => setShowSchedule(false)}>
-                      前往配置 →
-                    </Link>
-                  )}
-                </p>
-              </div>
 
-              {!draft.enabled && (
-                <p className="mt-3 text-[10px] text-muted/70">
-                  当前: 已关闭。开启后将按设定时间自动复盘。
-                </p>
-              )}
+                    {/* 推送渠道(独立常驻) */}
+                    <div className="mt-3 rounded-btn bg-elevated/40 px-3 py-2.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-foreground">生成后推送完整报告</span>
+                        <span className="text-sm text-muted/70">{channels.length === 0 ? '未开启' : `${channels.length} 个渠道`}</span>
+                      </div>
+                      <div className="mt-2 space-y-1.5">
+                        <button
+                          type="button"
+                          disabled={pushMut.isPending}
+                          onClick={() => togglePushChannel(scheduleTab, 'feishu')}
+                          className={cn(
+                            'flex w-full items-center gap-2 rounded-btn border px-2.5 py-1.5 text-left transition-colors disabled:opacity-50',
+                            channels.includes('feishu')
+                              ? 'border-accent/40 bg-accent/10'
+                              : 'border-border/60 bg-base/40 hover:bg-base/60',
+                          )}
+                        >
+                          <span className={cn('flex h-3 w-3 shrink-0 items-center justify-center rounded border', channels.includes('feishu') ? 'border-accent bg-accent text-white' : 'border-border')}>
+                            {channels.includes('feishu') && <Check className="h-2.5 w-2.5" />}
+                          </span>
+                          <span className="text-sm text-foreground">飞书</span>
+                          <span className="text-xs text-muted">群推送 Webhook</span>
+                          <span className={cn('ml-auto text-xs', feishuConfigured ? 'text-emerald-500' : 'text-warning')}>
+                            {feishuConfigured ? '已配置' : '未配置'}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={pushMut.isPending}
+                          onClick={() => togglePushChannel(scheduleTab, 'wecom')}
+                          className={cn(
+                            'flex w-full items-center gap-2 rounded-btn border px-2.5 py-1.5 text-left transition-colors disabled:opacity-50',
+                            channels.includes('wecom')
+                              ? 'border-accent/40 bg-accent/10'
+                              : 'border-border/60 bg-base/40 hover:bg-base/60',
+                          )}
+                        >
+                          <span className={cn('flex h-3 w-3 shrink-0 items-center justify-center rounded border', channels.includes('wecom') ? 'border-accent bg-accent text-white' : 'border-border')}>
+                            {channels.includes('wecom') && <Check className="h-2.5 w-2.5" />}
+                          </span>
+                          <span className="text-sm text-foreground">企业微信</span>
+                          <span className="text-xs text-muted">群推送 Webhook</span>
+                          <span className={cn('ml-auto text-xs', wecomConfigured ? 'text-emerald-500' : 'text-warning')}>
+                            {wecomConfigured ? '已配置' : '未配置'}
+                          </span>
+                        </button>
+                      </div>
+                      <p className="mt-1.5 text-sm leading-relaxed text-muted/70">
+                        手动或定时生成的{scheduleTab === 'market' ? '复盘' : '分析'}都会推送完整报告。复用「设置 → 实时监控」的 Webhook 配置。
+                        {((channels.includes('feishu') && !feishuConfigured) || (channels.includes('wecom') && !wecomConfigured)) && (
+                          <Link to="/settings?tab=monitoring" className="ml-1 text-accent hover:underline" onClick={() => setShowSchedule(false)}>
+                            前往配置 →
+                          </Link>
+                        )}
+                      </p>
+                    </div>
 
-              {/* 操作区: 取消 + 保存(统一提交开关+时间) */}
-              <div className="mt-5 flex justify-end gap-2">
-                <button
-                  onClick={() => setShowSchedule(false)}
-                  className="rounded-btn bg-elevated px-4 py-1.5 text-xs text-secondary transition-colors hover:text-foreground"
-                >
-                  取消
-                </button>
-                <button
-                  onClick={() => reviewMut.mutate({ enabled: draft.enabled, hour: draft.hour, minute: draft.minute })}
-                  disabled={reviewMut.isPending}
-                  className="inline-flex items-center gap-1.5 rounded-btn bg-accent px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
-                >
-                  {reviewMut.isPending ? '保存中…' : '保存'}
-                </button>
-              </div>
+                    {!d.enabled && (
+                      <p className="mt-3 text-sm text-muted/70">
+                        当前: 已关闭。开启后将按设定时间自动{tabLabel}。
+                      </p>
+                    )}
+
+                    {/* 操作区 */}
+                    <div className="mt-5 flex justify-end gap-2">
+                      <button
+                        onClick={() => setShowSchedule(false)}
+                        className="rounded-btn bg-elevated px-4 py-1.5 text-sm text-secondary transition-colors hover:text-foreground"
+                      >
+                        取消
+                      </button>
+                      <button
+                        onClick={() => reviewMut.mutate({ tab: scheduleTab, enabled: d.enabled, hour: d.hour, minute: d.minute })}
+                        disabled={reviewMut.isPending}
+                        className="inline-flex items-center gap-1.5 rounded-btn bg-accent px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-accent/90 disabled:opacity-50"
+                      >
+                        {reviewMut.isPending ? '保存中…' : '保存'}
+                      </button>
+                    </div>
+                  </>
+                )
+              })()}
             </motion.div>
           </motion.div>
         )}
@@ -739,8 +818,8 @@ function MarketSummaryBar({ data }: { data: OverviewMarket }) {
           {score ?? '—'}
         </span>
         <div className="leading-tight">
-          <div className="text-[11px] font-medium text-foreground">{data.emotion?.label ?? '情绪'}</div>
-          <div className="text-[9px] text-secondary">情绪温度</div>
+          <div className="text-sm font-medium text-foreground">{data.emotion?.label ?? '情绪'}</div>
+          <div className="text-xs text-secondary">情绪温度</div>
         </div>
       </div>
 
@@ -750,8 +829,8 @@ function MarketSummaryBar({ data }: { data: OverviewMarket }) {
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
         {indices.map(idx => (
           <div key={idx.symbol} className="flex items-center gap-1">
-            <span className="text-[11px] text-secondary">{indexShort(idx.name, idx.symbol)}</span>
-            <span className={cn('font-mono text-[11px] font-semibold tabular-nums', pctClass(idx.change_pct))}>
+            <span className="text-sm text-secondary">{indexShort(idx.name, idx.symbol)}</span>
+            <span className={cn('font-mono text-sm font-semibold tabular-nums', pctClass(idx.change_pct))}>
               {fmtPctAlready(idx.change_pct, 2, true)}
             </span>
           </div>
@@ -761,7 +840,7 @@ function MarketSummaryBar({ data }: { data: OverviewMarket }) {
       <div className="hidden h-7 w-px bg-border sm:block" />
 
       {/* 涨跌结构 */}
-      <div className="flex items-center gap-1.5 text-[11px]">
+      <div className="flex items-center gap-1.5 text-sm">
         <span className="text-secondary">涨跌</span>
         <span className="font-mono font-semibold text-bull">{data.breadth?.up ?? 0}</span>
         <span className="text-muted">/</span>
@@ -769,14 +848,14 @@ function MarketSummaryBar({ data }: { data: OverviewMarket }) {
       </div>
 
       {/* 涨停结构 */}
-      <div className="flex items-center gap-1.5 text-[11px]">
+      <div className="flex items-center gap-1.5 text-sm">
         <span className="text-secondary">涨停</span>
         <span className="font-mono font-semibold text-bull">{data.limit?.limit_up ?? 0}</span>
         <span className="text-secondary">封板 {(data.limit?.seal_rate ?? 0).toFixed(0)}%</span>
       </div>
 
       {/* 成交额 */}
-      <div className="flex items-center gap-1.5 text-[11px]">
+      <div className="flex items-center gap-1.5 text-sm">
         <span className="text-secondary">成交</span>
         <span className="font-mono font-semibold text-foreground">{fmtBigNum(data.amount?.total)}</span>
       </div>
@@ -815,18 +894,18 @@ function HoldingsSummaryBar() {
           <Wallet className="h-4 w-4" />
         </span>
         <div className="leading-tight">
-          <div className="text-[11px] font-medium text-foreground">
+          <div className="text-sm font-medium text-foreground">
             {isLoading ? '…' : `${count} 只持仓`}
           </div>
-          <div className="text-[9px] text-secondary">持仓概览</div>
+          <div className="text-xs text-secondary">持仓概览</div>
         </div>
       </div>
       <div className="hidden h-7 w-px bg-border sm:block" />
-      <div className="flex items-center gap-1.5 text-[11px]">
+      <div className="flex items-center gap-1.5 text-sm">
         <span className="text-secondary">总市值</span>
         <span className="font-mono font-semibold text-foreground">{fmtBigNum(mv)}</span>
       </div>
-      <div className="flex items-center gap-1.5 text-[11px]">
+      <div className="flex items-center gap-1.5 text-sm">
         <span className="text-secondary">浮盈亏</span>
         <span className={cn('font-mono font-semibold', pnl > 0 ? 'text-bull' : pnl < 0 ? 'text-bear' : 'text-muted')}>
           {pnl >= 0 ? '+' : ''}{fmtBigNum(Math.abs(pnl))}
@@ -855,26 +934,26 @@ function SettlementSummaryBar() {
           <Receipt className="h-4 w-4" />
         </span>
         <div className="leading-tight">
-          <div className="text-[11px] font-medium text-foreground">
+          <div className="text-sm font-medium text-foreground">
             {isLoading ? '…' : `${data?.records_count ?? 0} 条记录`}
           </div>
-          <div className="text-[9px] text-secondary">交割单概览</div>
+          <div className="text-xs text-secondary">交割单概览</div>
         </div>
       </div>
       <div className="hidden h-7 w-px bg-border sm:block" />
-      <div className="flex items-center gap-1.5 text-[11px]">
+      <div className="flex items-center gap-1.5 text-sm">
         <span className="text-secondary">买入</span>
         <span className="font-mono font-semibold text-bull">{s?.buy_count ?? 0}</span>
         <span className="text-secondary ml-2">卖出</span>
         <span className="font-mono font-semibold text-bear">{s?.sell_count ?? 0}</span>
       </div>
-      <div className="flex items-center gap-1.5 text-[11px]">
+      <div className="flex items-center gap-1.5 text-sm">
         <span className="text-secondary">已实现盈亏</span>
         <span className={cn('font-mono font-semibold', realized > 0 ? 'text-bull' : realized < 0 ? 'text-bear' : 'text-muted')}>
           {realized >= 0 ? '+' : ''}{fmtBigNum(Math.abs(realized))}
         </span>
       </div>
-      <div className="flex items-center gap-1.5 text-[11px]">
+      <div className="flex items-center gap-1.5 text-sm">
         <span className="text-secondary">费用</span>
         <span className="font-mono font-semibold text-muted">{fmtBigNum(s?.total_fees ?? 0)}</span>
       </div>
@@ -907,10 +986,10 @@ function ReportPanel({
           <AlertTriangle className="h-5 w-5 text-danger" />
         </div>
         <div className="text-sm font-medium text-foreground">复盘失败</div>
-        <div className="max-w-md text-center text-xs text-secondary">{error || '请检查 AI 配置后重试'}</div>
+        <div className="max-w-md text-center text-sm text-secondary">{error || '请检查 AI 配置后重试'}</div>
         <button
           onClick={onRegenerate}
-          className="mt-1 inline-flex items-center gap-1.5 rounded-btn bg-accent/15 px-3 py-1.5 text-xs text-accent transition-colors hover:bg-accent/20"
+          className="mt-1 inline-flex items-center gap-1.5 rounded-btn bg-accent/15 px-3 py-1.5 text-sm text-accent transition-colors hover:bg-accent/20"
         >
           <RefreshCw className="h-3.5 w-3.5" />重新生成
         </button>
@@ -929,7 +1008,7 @@ function ReportPanel({
         </div>
         <div className="text-center">
           <div className="text-base font-semibold text-foreground">{tabConfig.emptyTitle}</div>
-          <p className="mx-auto mt-2 max-w-sm text-xs leading-relaxed text-secondary">
+          <p className="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-secondary">
             {tabConfig.emptyDesc}
           </p>
         </div>
@@ -947,13 +1026,13 @@ function ReportPanel({
             ].map((s) => (
               <div key={s.label} className="flex flex-col items-center gap-1 rounded-btn bg-elevated/40 px-2 py-2">
                 <span className="text-base">{s.icon}</span>
-                <span className="text-[10px] text-secondary">{s.label}</span>
+                <span className="text-sm text-secondary">{s.label}</span>
               </div>
             ))}
           </div>
         )}
-        <div className="mt-2 flex items-center gap-1.5 text-[11px] text-muted">
-          <Sparkles className="h-3 w-3 text-accent" />
+        <div className="mt-2 flex items-center gap-1.5 text-sm text-muted">
+          <Sparkles className="h-3.5 w-3.5 text-accent" />
           点击右上角「{tabConfig.generateText}」开始
         </div>
       </div>
@@ -976,17 +1055,17 @@ function ReportPanel({
       <div className="flex items-center justify-between border-b border-border bg-gradient-to-r from-accent/5 to-transparent px-4 py-2.5">
         <div className="flex items-center gap-1.5">
           {isGenerating ? <RefreshCw className="h-3.5 w-3.5 animate-spin text-accent" /> : <BookOpenCheck className="h-3.5 w-3.5 text-accent" />}
-          <span className="text-xs font-medium text-foreground">
+          <span className="text-sm font-medium text-foreground">
             {showViewingTag ? `历史 · ${viewing!.as_of}` : isGenerating ? tabConfig.loadingText : '报告'}
           </span>
         </div>
         {showActions && (
           <div className="flex items-center gap-1">
-            <button onClick={onCopy} className="inline-flex items-center gap-1 rounded-btn bg-elevated px-2 py-1 text-[11px] text-secondary transition-colors hover:text-foreground hover:bg-elevated/70" title="复制全文">
-              <Copy className="h-3 w-3" />复制
+            <button onClick={onCopy} className="inline-flex items-center gap-1 rounded-btn bg-elevated px-2 py-1 text-sm text-secondary transition-colors hover:text-foreground hover:bg-elevated/70" title="复制全文">
+              <Copy className="h-3.5 w-3.5" />复制
             </button>
-            <button onClick={onDownload} className="inline-flex items-center gap-1 rounded-btn bg-elevated px-2 py-1 text-[11px] text-secondary transition-colors hover:text-foreground hover:bg-elevated/70" title="下载为 Markdown">
-              <Download className="h-3 w-3" />下载
+            <button onClick={onDownload} className="inline-flex items-center gap-1 rounded-btn bg-elevated px-2 py-1 text-sm text-secondary transition-colors hover:text-foreground hover:bg-elevated/70" title="下载为 Markdown">
+              <Download className="h-3.5 w-3.5" />下载
             </button>
           </div>
         )}
@@ -1001,7 +1080,7 @@ function ReportPanel({
               <RefreshCw className="absolute -inset-1 h-13 w-13 animate-spin text-accent/30" style={{ animationDuration: '3s' }} />
             </div>
             <div className="text-sm text-foreground">{tabConfig.loadingText}</div>
-            <div className="text-xs text-secondary">分析指数结构 · 连板梯队 · 板块轮动 · 资金情绪</div>
+            <div className="text-sm text-secondary">分析指数结构 · 连板梯队 · 板块轮动 · 资金情绪</div>
           </div>
         ) : (
           <div className="prose prose-invert max-w-none">
@@ -1040,9 +1119,9 @@ function HistoryPanel({
   return (
     <div className="overflow-hidden rounded-card border border-border bg-surface/80">
       <div className="flex items-center gap-1.5 border-b border-border bg-gradient-to-r from-accent/5 to-transparent px-3 py-2.5">
-        <History className="h-3.5 w-3.5 text-accent" />
-        <span className="text-xs font-medium text-foreground">{tabConfig.historyLabel}</span>
-        <span className="font-mono text-[10px] text-muted">({reports.length})</span>
+        <History className="h-4 w-4 text-accent" />
+        <span className="text-sm font-medium text-foreground">{tabConfig.historyLabel}</span>
+        <span className="font-mono text-sm text-muted">({reports.length})</span>
       </div>
       <div className="max-h-[calc(100vh-26rem)] overflow-y-auto p-2">
         {loading ? (
@@ -1050,8 +1129,8 @@ function HistoryPanel({
         ) : empty ? (
           <div className="flex flex-col items-center justify-center gap-2 px-3 py-10 text-center">
             <History className="h-7 w-7 text-muted/40" strokeWidth={1.5} />
-            <div className="text-[11px] text-muted">暂无{tabConfig.historyLabel}</div>
-            <div className="text-[10px] text-muted/60">生成完成后自动归档</div>
+            <div className="text-sm text-muted">暂无{tabConfig.historyLabel}</div>
+            <div className="text-sm text-muted/60">生成完成后自动归档</div>
           </div>
         ) : (
           <div className="space-y-1">
@@ -1068,8 +1147,8 @@ function HistoryPanel({
                   <RefreshCw className="h-3.5 w-3.5 animate-spin text-accent" />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-[11px] font-medium text-accent">生成中…</div>
-                  <div className="mt-0.5 truncate text-[10px] text-secondary">{tabConfig.loadingText}</div>
+                  <div className="truncate text-sm font-medium text-accent">生成中…</div>
+                  <div className="mt-0.5 truncate text-sm text-secondary">{tabConfig.loadingText}</div>
                 </div>
               </div>
             )}
@@ -1083,7 +1162,7 @@ function HistoryPanel({
                 const color = scoreColor(r.emotion_score)
                 badge = (
                   <div
-                    className="grid h-8 w-8 shrink-0 place-items-center rounded font-mono text-[10px] font-bold tabular-nums"
+                    className="grid h-9 w-9 shrink-0 place-items-center rounded font-mono text-xs font-bold tabular-nums"
                     style={{ color, backgroundColor: `${color}1a` }}
                   >
                     {r.emotion_score ?? '—'}
@@ -1091,20 +1170,20 @@ function HistoryPanel({
                 )
                 primary = (
                   <>
-                    <span className="truncate text-[11px] font-medium text-foreground">{r.emotion_label ?? '—'}</span>
-                    <span className="font-mono text-[10px] text-secondary">{r.as_of}</span>
+                    <span className="truncate text-sm font-medium text-foreground">{r.emotion_label ?? '—'}</span>
+                    <span className="font-mono text-sm text-secondary">{r.as_of}</span>
                   </>
                 )
                 secondary = r.summary
                   ? (() => {
                       const pcts = parseIndexPcts(shortenIndexNames(r.summary).split('|')[0])
                       if (pcts.length === 0) {
-                        return <span className="truncate text-[10px] text-secondary">{r.content.slice(0, 40)}</span>
+                        return <span className="truncate text-sm text-secondary">{r.content.slice(0, 40)}</span>
                       }
                       return (
                         <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                           {pcts.map((p) => (
-                            <span key={p.name} className="inline-flex items-center gap-0.5 text-[10px]">
+                            <span key={p.name} className="inline-flex items-center gap-0.5 text-sm">
                               <span className="text-secondary">{p.name}</span>
                               <span className={cn('font-mono font-medium tabular-nums', pctClass(p.pctNum))}>{p.pctStr}</span>
                             </span>
@@ -1112,32 +1191,32 @@ function HistoryPanel({
                         </div>
                       )
                     })()
-                  : <span className="truncate text-[10px] text-secondary">{r.content.slice(0, 40)}</span>
+                  : <span className="truncate text-sm text-secondary">{r.content.slice(0, 40)}</span>
               } else if (tab === 'holdings') {
                 const countVal = r.summary?.count ?? r.count ?? 0
                 const totalMv = r.summary?.total_market_value
                 const pnlPct = r.summary?.total_pnl_pct
                 badge = (
-                  <div className="grid h-8 w-8 shrink-0 place-items-center rounded bg-accent/15 font-mono text-[10px] font-bold tabular-nums text-accent">
+                  <div className="grid h-9 w-9 shrink-0 place-items-center rounded bg-accent/15 font-mono text-xs font-bold tabular-nums text-accent">
                     {countVal}
                   </div>
                 )
                 primary = (
                   <>
-                    <span className="truncate text-[11px] font-medium text-foreground">{r.as_of}</span>
-                    <span className="text-[10px] text-secondary">持仓复盘</span>
+                    <span className="truncate text-sm font-medium text-foreground">{r.as_of}</span>
+                    <span className="text-sm text-secondary">持仓复盘</span>
                   </>
                 )
                 secondary = (
                   <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                     {totalMv != null && (
-                      <span className="inline-flex items-center gap-0.5 text-[10px]">
+                      <span className="inline-flex items-center gap-0.5 text-sm">
                         <span className="text-secondary">市值</span>
                         <span className="font-mono font-medium text-foreground">{fmtBigNum(totalMv)}</span>
                       </span>
                     )}
                     {pnlPct != null && (
-                      <span className="inline-flex items-center gap-0.5 text-[10px]">
+                      <span className="inline-flex items-center gap-0.5 text-sm">
                         <span className="text-secondary">盈亏</span>
                         <span className={cn('font-mono font-medium tabular-nums', pctClass(pnlPct))}>{fmtPctAlready(pnlPct, 2, true)}</span>
                       </span>
@@ -1150,26 +1229,26 @@ function HistoryPanel({
                 const totalTrades = r.summary?.total_trades ?? 0
                 const realized = r.summary?.total_realized_pnl
                 badge = (
-                  <div className="grid h-8 w-8 shrink-0 place-items-center rounded bg-accent/15 font-mono text-[10px] font-bold tabular-nums text-accent">
+                  <div className="grid h-9 w-9 shrink-0 place-items-center rounded bg-accent/15 font-mono text-xs font-bold tabular-nums text-accent">
                     {recordsCount}
                   </div>
                 )
                 primary = (
                   <>
-                    <span className="truncate text-[11px] font-medium text-foreground">{r.as_of}</span>
-                    <span className="text-[10px] text-secondary">交割单分析</span>
+                    <span className="truncate text-sm font-medium text-foreground">{r.as_of}</span>
+                    <span className="text-sm text-secondary">交割单分析</span>
                   </>
                 )
                 secondary = (
                   <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                     {totalTrades != null && totalTrades > 0 && (
-                      <span className="inline-flex items-center gap-0.5 text-[10px]">
+                      <span className="inline-flex items-center gap-0.5 text-sm">
                         <span className="text-secondary">交易</span>
                         <span className="font-mono font-medium text-foreground">{totalTrades}</span>
                       </span>
                     )}
                     {realized != null && (
-                      <span className="inline-flex items-center gap-0.5 text-[10px]">
+                      <span className="inline-flex items-center gap-0.5 text-sm">
                         <span className="text-secondary">盈亏</span>
                         <span className={cn('font-mono font-medium tabular-nums', realized > 0 ? 'text-bull' : realized < 0 ? 'text-bear' : 'text-muted')}>
                           {realized >= 0 ? '+' : ''}{fmtBigNum(Math.abs(realized))}
@@ -1191,10 +1270,30 @@ function HistoryPanel({
                 >
                   {badge}
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">{primary}</div>
+                    <div className="flex items-center gap-1.5">
+                      {primary}
+                      {(() => {
+                        // Skill 徽章:有 skill_name 优先显示名称;否则 skill_id;老报告无信息显示"默认 Prompt"灰徽
+                        const badgeText = r.skill_name ?? r.skill_id ?? '默认 Prompt'
+                        const hasSkill = !!(r.skill_name || r.skill_id)
+                        return (
+                          <span
+                            className={cn(
+                              'ml-0.5 inline-flex items-center rounded-full px-1.5 py-px text-xs font-medium',
+                              hasSkill
+                                ? 'bg-accent/10 text-accent'
+                                : 'bg-elevated text-muted',
+                            )}
+                            title={hasSkill ? `Skill: ${r.skill_id ?? r.skill_name}` : '使用默认硬编码 Prompt 生成'}
+                          >
+                            {badgeText}
+                          </span>
+                        )
+                      })()}
+                    </div>
                     <div className="mt-0.5">{secondary}</div>
                     {r.created_at && (
-                      <div className="mt-0.5 font-mono text-[9px] text-muted">{fmtArchivedAt(r.created_at)}</div>
+                      <div className="mt-0.5 font-mono text-xs text-muted">{fmtArchivedAt(r.created_at)}</div>
                     )}
                   </div>
                   <button

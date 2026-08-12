@@ -479,6 +479,39 @@ def set_review_push_channels(channels: list[str]) -> list[str]:
     return cleaned
 
 
+def get_review_default_skill() -> dict:
+    """大盘定时复盘使用的默认 Skill。
+
+    优先读偏好 `review_default_skill` + `review_default_skill_params`;
+    缺省回落到 registry.default_skill("market")。
+
+    Returns:
+        {"id": str, "params": dict}
+    """
+    raw = load()
+    skill_id = raw.get("review_default_skill")
+    params = raw.get("review_default_skill_params") or {}
+    if not isinstance(params, dict):
+        params = {}
+    if not skill_id:
+        try:
+            from app.ai_skills import registry
+            default = registry.default_skill("market")
+            skill_id = default.get("id")
+        except Exception:  # noqa: BLE001
+            skill_id = None
+    return {"id": skill_id, "params": params}
+
+
+def set_review_default_skill(skill_id: str | None, params: dict | None = None) -> dict:
+    """保存大盘定时复盘默认 Skill。skill_id=None 表示清除偏好走 registry 默认。"""
+    payload: dict = {"review_default_skill": skill_id or None}
+    if params is not None:
+        payload["review_default_skill_params"] = params if isinstance(params, dict) else {}
+    save(payload)
+    return get_review_default_skill()
+
+
 def get_position_review_schedule() -> dict:
     """定时持仓复盘调度 {"enabled": False, "hour": 15, "minute": 15}。默认关闭。
 
@@ -520,6 +553,114 @@ def set_position_review_push_channels(channels: list[str]) -> list[str]:
             cleaned.append(c)
     save({"position_review_push_channels": cleaned})
     return cleaned
+
+
+def get_position_default_skill() -> dict:
+    """持仓定时复盘使用的默认 Skill。
+
+    优先读偏好 `position_review_default_skill` + `position_review_default_skill_params`;
+    缺省回落到 registry.default_skill("holdings")。
+
+    Returns:
+        {"id": str, "params": dict}
+    """
+    raw = load()
+    skill_id = raw.get("position_review_default_skill")
+    params = raw.get("position_review_default_skill_params") or {}
+    if not isinstance(params, dict):
+        params = {}
+    if not skill_id:
+        try:
+            from app.ai_skills import registry
+            default = registry.default_skill("holdings")
+            skill_id = default.get("id")
+        except Exception:  # noqa: BLE001
+            skill_id = None
+    return {"id": skill_id, "params": params}
+
+
+def set_position_default_skill(skill_id: str | None, params: dict | None = None) -> dict:
+    """保存持仓定时复盘默认 Skill。skill_id=None 表示清除偏好走 registry 默认。"""
+    payload: dict = {"position_review_default_skill": skill_id or None}
+    if params is not None:
+        payload["position_review_default_skill_params"] = params if isinstance(params, dict) else {}
+    save(payload)
+    return get_position_default_skill()
+
+
+# ===== 交割单 AI 分析定时/推送 =====
+
+def get_settlement_review_schedule() -> dict:
+    """定时交割单分析调度 {"enabled": False, "hour": 15, "minute": 40}。默认关闭。
+
+    紧随大盘复盘(默认 15:10)、持仓复盘(默认 15:15)之后,默认 15:40;强制下限 15:00。
+    """
+    d = load().get("settlement_review_schedule", {"enabled": False, "hour": 15, "minute": 40})
+    return {
+        "enabled": bool(d.get("enabled", False)),
+        "hour": d.get("hour", 15),
+        "minute": d.get("minute", 40),
+    }
+
+
+def set_settlement_review_schedule(enabled: bool, hour: int, minute: int) -> dict:
+    """保存定时交割单分析调度。强制时间下限 15:00。"""
+    h = max(0, min(23, hour))
+    m = max(0, min(59, minute))
+    if h * 60 + m < 15 * 60:
+        h, m = 15, 0
+    save({"settlement_review_schedule": {"enabled": bool(enabled), "hour": h, "minute": m}})
+    return {"enabled": bool(enabled), "hour": h, "minute": m}
+
+
+def get_settlement_review_push_channels() -> list[str]:
+    """定时交割单分析推送渠道。空列表 = 不推送。"""
+    raw = load().get("settlement_review_push_channels")
+    if isinstance(raw, list):
+        return [c for c in raw if c in REVIEW_PUSH_CHANNELS]
+    return []
+
+
+def set_settlement_review_push_channels(channels: list[str]) -> list[str]:
+    """保存定时交割单分析推送渠道。过滤白名单外的值、去重、保序。"""
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for c in channels or []:
+        if c in REVIEW_PUSH_CHANNELS and c not in seen:
+            seen.add(c)
+            cleaned.append(c)
+    save({"settlement_review_push_channels": cleaned})
+    return cleaned
+
+
+def get_settlement_default_skill() -> dict:
+    """交割单定时分析使用的默认 Skill。
+
+    优先读偏好 `settlement_review_default_skill` + `_params`;
+    缺省回落到 registry.default_skill("settlement")。
+    """
+    raw = load()
+    skill_id = raw.get("settlement_review_default_skill")
+    params = raw.get("settlement_review_default_skill_params") or {}
+    if not isinstance(params, dict):
+        params = {}
+    if not skill_id:
+        try:
+            from app.ai_skills import registry
+            default = registry.default_skill("settlement")
+            skill_id = default.get("id")
+        except Exception:  # noqa: BLE001
+            skill_id = None
+    return {"id": skill_id, "params": params}
+
+
+def set_settlement_default_skill(skill_id: str | None, params: dict | None = None) -> dict:
+    """保存交割单定时分析默认 Skill。skill_id=None 表示清除偏好走 registry 默认。"""
+    payload: dict = {"settlement_review_default_skill": skill_id or None}
+    if params is not None:
+        payload["settlement_review_default_skill_params"] = params if isinstance(params, dict) else {}
+    save(payload)
+    return get_settlement_default_skill()
 
 
 

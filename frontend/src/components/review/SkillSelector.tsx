@@ -50,7 +50,7 @@ export function SkillSelector({ tab, onToggleParams, paramsOpen }: Props) {
 
   if (state.loading) {
     return (
-      <div className="flex items-center gap-1.5 text-[11px] text-secondary">
+      <div className="flex items-center gap-1.5 text-sm text-secondary">
         <span className="animate-pulse">加载 Skill...</span>
       </div>
     )
@@ -63,11 +63,11 @@ export function SkillSelector({ tab, onToggleParams, paramsOpen }: Props) {
       {/* Skill 下拉 */}
       <button
         onClick={() => setOpen(o => !o)}
-        className="inline-flex items-center gap-1.5 rounded-btn border border-border bg-surface px-2.5 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-elevated"
+        className="inline-flex items-center gap-1.5 rounded-btn border border-border bg-surface px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-elevated"
       >
-        <span className="text-sm leading-none">{selected?.emoji ?? '📊'}</span>
-        <span className="max-w-[120px] truncate">{selected?.name ?? '选择 Skill'}</span>
-        <ChevronDown className="h-3 w-3 text-secondary" />
+        <span className="text-base leading-none">{selected?.emoji ?? '📊'}</span>
+        <span className="max-w-[140px] truncate">{selected?.name ?? '选择 Skill'}</span>
+        <ChevronDown className="h-4 w-4 text-secondary" />
       </button>
 
       {/* 参数按钮 */}
@@ -75,18 +75,18 @@ export function SkillSelector({ tab, onToggleParams, paramsOpen }: Props) {
         <button
           onClick={onToggleParams}
           className={cn(
-            'grid h-6 w-6 place-items-center rounded border border-border transition-colors',
+            'grid h-7 w-7 place-items-center rounded border border-border transition-colors',
             paramsOpen ? 'bg-accent/15 text-accent' : 'bg-surface text-secondary hover:text-foreground',
           )}
           title="Skill 参数"
         >
-          <Settings2 className="h-3 w-3" />
+          <Settings2 className="h-4 w-4" />
         </button>
       )}
 
       {/* 下拉列表 */}
       {open && (
-        <div className="absolute right-0 top-full z-50 mt-1 min-w-[220px] rounded-card border border-border bg-surface shadow-lg">
+        <div className="absolute right-0 top-full z-50 mt-1 min-w-[260px] rounded-card border border-border bg-surface shadow-lg">
           {state.skills.map(skill => (
             <button
               key={skill.id}
@@ -95,26 +95,26 @@ export function SkillSelector({ tab, onToggleParams, paramsOpen }: Props) {
                 setOpen(false)
               }}
               className={cn(
-                'flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] transition-colors first:rounded-t-card last:rounded-b-card',
+                'flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left text-sm transition-colors first:rounded-t-card last:rounded-b-card',
                 skill.id === state.selectedId
                   ? 'bg-accent/10 text-accent'
                   : 'text-foreground hover:bg-elevated',
               )}
             >
-              <span className="text-sm leading-none">{skill.emoji ?? '📊'}</span>
+              <span className="text-base leading-none">{skill.emoji ?? '📊'}</span>
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-1">
+                <div className="flex items-center gap-1.5">
                   <span className="font-medium truncate">{skill.name}</span>
                   {skill.default_for_category && (
-                    <span className="text-[9px] text-secondary">默认</span>
+                    <span className="text-sm text-secondary">默认</span>
                   )}
                 </div>
                 {skill.description && (
-                  <div className="text-[9px] text-secondary truncate">{skill.description}</div>
+                  <div className="text-sm text-secondary truncate leading-relaxed">{skill.description}</div>
                 )}
               </div>
               {skill.id === state.selectedId && (
-                <Check className="h-3 w-3 flex-shrink-0" />
+                <Check className="h-4 w-4 flex-shrink-0" />
               )}
             </button>
           ))}

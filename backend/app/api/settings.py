@@ -452,6 +452,10 @@ def get_preferences() -> dict:
         "depth_finalize_time": preferences.get_depth_finalize_time(),
         "review_schedule": preferences.get_review_schedule(),
         "review_push_channels": preferences.get_review_push_channels(),
+        "position_review_schedule": preferences.get_position_review_schedule(),
+        "position_review_push_channels": preferences.get_position_review_push_channels(),
+        "settlement_review_schedule": preferences.get_settlement_review_schedule(),
+        "settlement_review_push_channels": preferences.get_settlement_review_push_channels(),
     }
 
 
@@ -1561,3 +1565,42 @@ def update_position_review_push(req: ReviewPushIn) -> dict:
     from app.services import preferences
     saved = preferences.set_position_review_push_channels(req.channels)
     return {"position_review_push_channels": saved}
+
+
+@router.put("/preferences/settlement-review-schedule")
+def update_settlement_review_schedule(req: ReviewScheduleIn, request: Request) -> dict:
+    """保存定时交割单分析调度并立即更新 APScheduler job。"""
+    from app.services import preferences
+
+    if req.enabled:
+        from app import secrets_store
+        if not secrets_store.get_ai_key():
+            raise HTTPException(
+                status_code=400,
+                detail="交割单分析依赖 AI,请先在「设置 → AI」配置 API Key 后再开启",
+            )
+
+    sched = preferences.set_settlement_review_schedule(req.enabled, req.hour, req.minute)
+
+    from app.jobs.daily_pipeline import _register_settlement_review_job, SETTLEMENT_REVIEW_JOB_ID
+    scheduler = getattr(request.app.state, "scheduler", None)
+    if scheduler:
+        if sched["enabled"]:
+            _register_settlement_review_job(scheduler, sched["hour"], sched["minute"])
+            logger.info("scheduled_settlement_review enabled @%02d:%02d mon-fri",
+                        sched["hour"], sched["minute"])
+        else:
+            try:
+                scheduler.remove_job(SETTLEMENT_REVIEW_JOB_ID)
+            except Exception:
+                pass
+
+    return sched
+
+
+@router.put("/preferences/settlement-review-push")
+def update_settlement_review_push(req: ReviewPushIn) -> dict:
+    """定时交割单分析推送渠道(多选)。空数组=不推送。"""
+    from app.services import preferences
+    saved = preferences.set_settlement_review_push_channels(req.channels)
+    return {"settlement_review_push_channels": saved}

@@ -47,6 +47,20 @@ async def analyze_market(request: Request, req: AnalyzeRequest):
     """
     from datetime import date as date_cls
 
+    # skill_id 预校验:不存在/类别不匹配直接 400,不静默 fallback
+    if req.skill_id:
+        from app.ai_skills import registry
+        try:
+            skill = registry.get_skill(req.skill_id)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        if skill.meta.get("category") != "market":
+            raise HTTPException(
+                400,
+                f"Skill {req.skill_id}(类别 {skill.meta.get('category')}) "
+                f"不适用于大盘复盘,期望 category=market",
+            )
+
     repo = request.app.state.repo
     quote_service = getattr(request.app.state, "quote_service", None)
     depth_service = getattr(request.app.state, "depth_service", None)
@@ -85,6 +99,9 @@ class SaveReportRequest(BaseModel):
     summary: str = ""
     emotion_score: int | None = None
     emotion_label: str = ""
+    skill_id: str | None = None
+    skill_name: str | None = None
+    skill_params: dict | None = None
 
 
 @router.get("/reports")
@@ -103,6 +120,9 @@ def save_report(request: Request, req: SaveReportRequest):
         "summary": req.summary,
         "emotion_score": req.emotion_score,
         "emotion_label": req.emotion_label,
+        "skill_id": req.skill_id,
+        "skill_name": req.skill_name,
+        "skill_params": req.skill_params or {},
     })
     # 推送到飞书(可选): 与定时复盘共用同一开关 review_push_enabled 与 _maybe_push_review。
     # 内部 try/except 静默降级, 不影响归档返回值。

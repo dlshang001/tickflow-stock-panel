@@ -37,8 +37,8 @@ export function SkillParamsPanel({ tab }: Props) {
     <div className="rounded-card border border-border bg-surface/80 p-3">
       <div className="mb-2 flex items-center gap-1.5">
         <span className="text-sm">{selected.emoji}</span>
-        <span className="text-[11px] font-medium text-foreground">{selected.name}</span>
-        <span className="text-[9px] text-secondary">参数配置</span>
+        <span className="text-sm font-medium text-foreground">{selected.name}</span>
+        <span className="text-xs text-secondary">参数配置</span>
       </div>
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         {selected.params.map(param => {
@@ -46,7 +46,7 @@ export function SkillParamsPanel({ tab }: Props) {
           const value = state.params[pid]
           return (
             <div key={pid} className="flex items-center justify-between gap-2">
-              <label className="text-[10px] text-secondary">{param.label}</label>
+              <label className="text-xs text-secondary">{param.label}</label>
               <ParamControl
                 param={param}
                 value={value}
@@ -97,7 +97,7 @@ function ParamControl({
       <select
         value={value ?? ''}
         onChange={(e) => onChange(e.target.value)}
-        className="h-6 rounded border border-border bg-surface px-1.5 text-[10px] text-foreground"
+        className="h-7 rounded border border-border bg-surface px-2 text-xs text-foreground"
       >
         {options.map((opt: string) => (
           <option key={opt} value={opt}>{opt}</option>
@@ -118,7 +118,7 @@ function ParamControl({
           const v = type === 'int' ? parseInt(e.target.value, 10) : parseFloat(e.target.value)
           onChange(isNaN(v) ? 0 : v)
         }}
-        className="h-6 w-16 rounded border border-border bg-surface px-1.5 text-[10px] font-mono text-foreground"
+        className="h-7 w-16 rounded border border-border bg-surface px-2 text-xs font-mono text-foreground"
       />
     )
   }
@@ -129,7 +129,7 @@ function ParamControl({
       type="text"
       value={value ?? ''}
       onChange={(e) => onChange(e.target.value)}
-      className="h-6 w-24 rounded border border-border bg-surface px-1.5 text-[10px] text-foreground"
+      className="h-7 w-24 rounded border border-border bg-surface px-2 text-xs text-foreground"
     />
   )
 }
