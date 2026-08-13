@@ -549,6 +549,9 @@ def run_now(
 
     emit("done", 100, "完成")
     _invalidate(None)  # 兜底:全清
+    # 同步完成后清除质量校验缓存, 令下次 /api/data/quality 重新扫描
+    from app.api.data import invalidate_quality_cache
+    invalidate_quality_cache()
 
     result = {
         "universe_size": len(universe),

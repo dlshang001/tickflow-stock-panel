@@ -139,24 +139,60 @@ def run_extend_history(
     start_str = new_start.strftime("%Y-%m-%d")
     end_str = earliest.strftime("%Y-%m-%d")
 
-    # 3. 拉日 K
+    # 3. 拉日 K (断点续传: 同范围未完成时跳过已完成 symbol, 避免重拉已落盘部分)
     emit("extend_history", 10, f"获取日K [{start_str} ~ {end_str}]…")
     logger.info("extend_history: daily K [%s ~ %s], %d symbols", start_str, end_str, len(universe))
 
-    def _daily_chunk(cur: int, tot: int) -> None:
-        emit("extend_history", 10 + int(35 * cur / tot),
-             f"日K 批次 {cur}/{tot}", stage_pct=int(100 * cur / tot), skip_log=True)
+    from app.services import sync_state
+    task = sync_state.begin_extend(new_start, earliest, universe)
+    to_fetch = [s for s in universe if s not in set(task.get("done", []))]
+    if to_fetch:
+        skipped = len(universe) - len(to_fetch)
+        if skipped:
+            logger.info("extend_history: 断点续传跳过 %d 只已同步标的, 本次拉取 %d 只",
+                        skipped, len(to_fetch))
+            emit("extend_history", 12, f"断点续传: 跳过 {skipped} 只已同步标的")
 
-    written_daily = kline_sync.sync_and_persist_daily_batch(
-        universe, repo, capset,
-        start_date=datetime.combine(new_start, datetime.min.time()),
-        end_date=datetime.combine(earliest, datetime.min.time()),
-        on_chunk_done=_daily_chunk,
-    )
+        def _daily_chunk(cur: int, tot: int) -> None:
+            emit("extend_history", 10 + int(35 * cur / tot),
+                 f"日K 批次 {cur}/{tot}", stage_pct=int(100 * cur / tot), skip_log=True)
+
+        def _chunk_ok(syms: list[str]) -> None:
+            sync_state.mark_extend_done(syms)
+
+        written_daily = kline_sync.sync_and_persist_daily_batch(
+            to_fetch, repo, capset,
+            start_date=datetime.combine(new_start, datetime.min.time()),
+            end_date=datetime.combine(earliest, datetime.min.time()),
+            on_chunk_done=_daily_chunk,
+            on_chunk_success=_chunk_ok,
+        )
+    else:
+        written_daily = 0
     emit("extend_history", 45, f"日K 完成,写入 {written_daily} 行")
     logger.info("extend_history: daily K done, %d rows", written_daily)
     _refresh_single_view(repo, "kline_daily")
     _invalidate("daily")
+
+    # 日K区间完整性校验 (只读): 标记疑似缺失段/低覆盖日期
+    integrity = kline_sync.check_daily_integrity(
+        repo, start=new_start, end=earliest,
+    )
+    if integrity.get("error"):
+        logger.warning("extend_history: daily integrity check failed: %s", integrity["error"])
+    elif integrity.get("missing_gap_count") or integrity.get("low_coverage_count"):
+        logger.warning(
+            "extend_history: daily integrity gaps=%d low_coverage=%d (%s~%s, %d dates, max_cov=%d)",
+            integrity["missing_gap_count"], integrity["low_coverage_count"],
+            integrity["date_start"], integrity["date_end"],
+            integrity["dates"], integrity["max_coverage"],
+        )
+    else:
+        logger.info(
+            "extend_history: daily integrity OK (%s~%s, %d dates, max_cov=%d)",
+            integrity["date_start"], integrity["date_end"],
+            integrity["dates"], integrity["max_coverage"],
+        )
 
     # 4. 拉除权因子 (新范围)
     written_adj = 0
@@ -216,6 +252,10 @@ def run_extend_history(
     daily_dir = repo.store.data_dir / "kline_daily"
     daily_days = len(list(daily_dir.glob("date=*"))) if daily_dir.exists() else 0
 
+    # 全部步骤成功 → 标记断点任务完成 (下次同范围重跑不再续传, 因数据已完整)
+    from app.services import sync_state
+    sync_state.finish_extend()
+
     emit("extend_history", 100, f"完成,已扩展至 {new_start}")
 
     return {
@@ -226,4 +266,5 @@ def run_extend_history(
         "adj_factor_rows": written_adj,
         "enriched_days": enriched_days,
         "universe_size": len(universe),
+        "integrity": integrity,
     }

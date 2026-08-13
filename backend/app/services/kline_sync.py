@@ -87,6 +87,39 @@ def _normalize_daily(df_in, default_symbol: str | None = None) -> pl.DataFrame:
     return df.select(keep)
 
 
+def _fetch_with_retry(
+    fetch,
+    *,
+    what: str,
+    attempts: int = 3,
+    base_delay: float = 1.0,
+):
+    """单次 SDK 拉取的指数退避重试 (同步上下文, 调用方已在线程池/worker)。
+
+    fetch: 无参可调用, 返回 SDK 结果。
+    what: 日志描述 (如 "日K chunk 3/50 (100 只)")。
+    失败 attempts 次后抛出最后一次异常, 由调用方决定该 chunk 是否放弃。
+    """
+    import time
+
+    delay = base_delay
+    last_err: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return fetch()
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            if attempt < attempts:
+                logger.warning(
+                    "%s 拉取失败(第 %d/%d 次), %.1fs 后重试: %s",
+                    what, attempt, attempts, delay, e,
+                )
+                time.sleep(delay)
+                delay *= 2
+    assert last_err is not None
+    raise last_err
+
+
 def sync_daily_batch(symbols: list[str],
                      count: int | None = None,
                      batch_size: int | None = None,
@@ -94,7 +127,10 @@ def sync_daily_batch(symbols: list[str],
                      start_time: datetime | None = None,
                      end_time: datetime | None = None,
                      on_chunk_done: Callable[[int, int], None] | None = None,
-                     failed_out: list[str] | None = None) -> pl.DataFrame:
+                     failed_out: list[str] | None = None,
+                     on_chunk_success: Callable[[list[str]], None] | None = None,
+                     retries: int = 3,
+                     retry_base_delay: float = 1.0) -> pl.DataFrame:
     """批量拉取多股日 K。
 
     优先使用 start_time / end_time 区间 + count=10000,确保覆盖完整时间段。
@@ -102,26 +138,36 @@ def sync_daily_batch(symbols: list[str],
 
     failed_out: 可选出参。拉取失败的分块标的会追加进该 list, 供上层判定「部分失败」
                 而非静默当成功(某分块断网 → 这些标的本轮未更新, 保持旧数据)。
+    on_chunk_success: 可选回调, 每个 chunk 拉取成功后调用 (传入该 chunk 的 symbol 列表),
+                供断点续传按 symbol 累积已完成进度。
+    retries / retry_base_delay: 每个 chunk 失败后的指数退避重试 (默认 3 次)。
     """
     tf = get_client()
     out: list[pl.DataFrame] = []
     chunks = chunked(symbols, batch_size)
     failed_syms: list[str] = []
 
+    # 统一构造请求 kwargs (与旧调用形态一致: 有区间传 start/end, 否则仅 count)
+    if start_time and end_time:
+        batch_kwargs = dict(
+            start_time=_datetime_to_ms(start_time),
+            end_time=_datetime_to_ms(end_time),
+            count=10000,
+        )
+    else:
+        batch_kwargs = dict(count=count or 250)
+
     for i, chunk in enumerate(chunks):
         sleep_between_batches(i, rpm)
         try:
-            if start_time and end_time:
-                raw = tf.klines.batch(
+            raw = _fetch_with_retry(
+                lambda: tf.klines.batch(
                     chunk, period="1d", adjust="none",
-                    start_time=_datetime_to_ms(start_time),
-                    end_time=_datetime_to_ms(end_time),
-                    count=10000,
-                    as_dataframe=True, show_progress=False,
-                )
-            else:
-                raw = tf.klines.batch(chunk, period="1d", count=count or 250, adjust="none",
-                                      as_dataframe=True, show_progress=False)
+                    as_dataframe=True, show_progress=False, **batch_kwargs,
+                ),
+                what=f"日K chunk {i + 1}/{len(chunks)} ({len(chunk)} 只)",
+                attempts=retries, base_delay=retry_base_delay,
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning("batch fetch failed for %d symbols (chunk %d/%d): %s",
                            len(chunk), i + 1, len(chunks), e)
@@ -136,6 +182,10 @@ def sync_daily_batch(symbols: list[str],
                 out.append(_normalize_daily(sub, default_symbol=sym))
         elif raw is not None and len(raw) > 0:
             out.append(_normalize_daily(raw))
+
+        # 断点续传: 该 chunk 拉取成功, 通知上层累积已完成 symbol
+        if on_chunk_success:
+            on_chunk_success(chunk)
 
         if on_chunk_done:
             on_chunk_done(i + 1, len(chunks))
@@ -226,6 +276,88 @@ def sync_and_persist_daily_batch(
         logger.warning("refresh view failed: %s", e)
 
     return df.height
+
+
+def check_daily_integrity(
+    repo: KlineRepository,
+    start: date | None = None,
+    end: date | None = None,
+    min_coverage_ratio: float = 0.5,
+) -> dict:
+    """只读校验日K区间完整性 (不修改数据)。
+
+    检查:
+      - 区间内实际有数据的日期序列, 相邻间隔 > 5 自然日视为疑似缺失段
+      - 每个日期的 symbol 覆盖数 (相对该区间最大覆盖为基准)
+      - 覆盖率 < min_coverage_ratio 的日期标记为低覆盖
+
+    返回统计 dict, 供任务结果/日志展示。校验失败时返回 {"error": ...}。
+    """
+    # 空目录: read_parquet glob 无匹配会抛 IO Error, 直接返回空统计
+    daily_dir = repo.store.data_dir / "kline_daily"
+    if not daily_dir.exists() or not any(daily_dir.glob("**/*.parquet")):
+        return {"dates": 0, "date_start": None, "date_end": None,
+                "max_coverage": 0, "missing_gaps": [], "missing_gap_count": 0,
+                "low_coverage_dates": [], "low_coverage_count": 0}
+
+    try:
+        d = repo.store.data_dir.as_posix()
+        sql = (
+            "SELECT date, COUNT(DISTINCT symbol) AS n "
+            f"FROM read_parquet('{d}/kline_daily/**/*.parquet', union_by_name=true) "
+            "WHERE date IS NOT NULL"
+        )
+        params: list = []
+        if start:
+            sql += " AND date >= ?"
+            params.append(start.isoformat())
+        if end:
+            sql += " AND date <= ?"
+            params.append(end.isoformat())
+        sql += " GROUP BY date ORDER BY date"
+        rows = repo.execute_all(sql, params)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("check_daily_integrity failed: %s", e)
+        return {"error": str(e)}
+
+    if not rows:
+        return {"dates": 0, "date_start": None, "date_end": None,
+                "max_coverage": 0, "missing_gaps": [], "missing_gap_count": 0,
+                "low_coverage_dates": [], "low_coverage_count": 0}
+
+    dates: list[date] = []
+    coverage: list[int] = []
+    for r in rows:
+        ddate = r[0] if isinstance(r[0], date) else date.fromisoformat(str(r[0]))
+        dates.append(ddate)
+        coverage.append(int(r[1]))
+    max_cov = max(coverage) if coverage else 0
+
+    # 疑似缺失段: 相邻数据日期间隔 > 5 自然日 (覆盖周末; 长假由 stale 检查兜底)
+    missing_gaps: list[str] = []
+    for i in range(1, len(dates)):
+        gap = (dates[i] - dates[i - 1]).days
+        if gap > 5:
+            missing_gaps.append(
+                f"{dates[i - 1].isoformat()}~{dates[i].isoformat()} (间隔 {gap} 天)"
+            )
+
+    low = [
+        d.isoformat()
+        for d, n in zip(dates, coverage)
+        if max_cov > 0 and n / max_cov < min_coverage_ratio
+    ]
+
+    return {
+        "dates": len(dates),
+        "date_start": dates[0].isoformat(),
+        "date_end": dates[-1].isoformat(),
+        "max_coverage": max_cov,
+        "missing_gaps": missing_gaps[:20],
+        "missing_gap_count": len(missing_gaps),
+        "low_coverage_dates": low[:20],
+        "low_coverage_count": len(low),
+    }
 
 
 def sync_daily_by_quotes(repo: KlineRepository) -> int:
@@ -657,6 +789,8 @@ def sync_minute_batch(
     segment_trading_days: int = 20,
     on_segment: Callable[[pl.DataFrame], None] | None = None,
     asset_type: AssetType = "stock",
+    retries: int = 3,
+    retry_base_delay: float = 1.0,
 ) -> pl.DataFrame:
     """批量拉取多股分钟 K。
 
@@ -673,6 +807,8 @@ def sync_minute_batch(
         传入时走「流式落盘」: 段内结果累积到 seg_out, 段末 concat 后回调并清空,
         不进入全局 out → 内存峰值从「全量」降到「单段」。适用于 sync_and_persist_minute。
         不传时 (如 get_minute_batch 的实时补拉) 保持原契约: 累积进 out 末尾一次性返回。
+
+    retries / retry_base_delay: 每个 (时间段 × chunk) 失败后的指数退避重试。
     """
     df, fallback = _try_custom_minute(
         symbols, start_time=start_time, end_time=end_time,
@@ -720,23 +856,28 @@ def sync_minute_batch(
             seg_label = "最新"
         seg_total = len(time_segments)
         chunks = chunked(symbols, batch_size)
+        # 统一构造请求 kwargs (与旧调用形态一致: 有区间传 start/end, 否则仅 count)
+        if cur_start and cur_end:
+            seg_kwargs = dict(
+                start_time=_datetime_to_ms(cur_start),
+                end_time=_datetime_to_ms(cur_end),
+                count=10000,
+            )
+        else:
+            seg_kwargs = dict(count=count or 1200)
         for i, chunk in enumerate(chunks):
             sleep_between_batches(step, rpm)
             step += 1
             try:
-                if cur_start and cur_end:
-                    raw = tf.klines.batch(
+                raw = _fetch_with_retry(
+                    lambda: tf.klines.batch(
                         chunk, period="1m",
-                        start_time=_datetime_to_ms(cur_start),
-                        end_time=_datetime_to_ms(cur_end),
-                        count=10000,
                         adjust="forward",
-                        as_dataframe=True, show_progress=False,
-                    )
-                else:
-                    raw = tf.klines.batch(chunk, period="1m", count=count or 1200,
-                                          adjust="forward",
-                                          as_dataframe=True, show_progress=False)
+                        as_dataframe=True, show_progress=False, **seg_kwargs,
+                    ),
+                    what=f"分钟K {seg_label} chunk {i + 1}/{len(chunks)} ({len(chunk)} 只)",
+                    attempts=retries, base_delay=retry_base_delay,
+                )
             except Exception as e:  # noqa: BLE001
                 logger.warning("minute batch fetch failed for %d symbols: %s", len(chunk), e)
                 continue

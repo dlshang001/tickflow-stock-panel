@@ -43,6 +43,7 @@ import { ExtendHistoryPanel } from '@/components/data/ExtendHistoryPanel'
 import { RepairDailyPanel } from '@/components/data/RepairDailyPanel'
 import { EnrichedRebuildPanel } from '@/components/data/EnrichedRebuildPanel'
 import { MinuteSyncConfig } from '@/components/data/MinuteSyncConfig'
+import { QualityPanel } from '@/components/data/QualityPanel'
 import { RegimeConfigCard } from '@/components/data/RegimeConfigCard'
 import { PipelineScopeConfig } from '@/components/data/PipelineScopeConfig'
 import { PageSettingsModal, getCardVisibility, getCardOrder, type CardKey } from '@/components/data/PageSettingsModal'
@@ -271,6 +272,8 @@ export function Data() {
       qc.invalidateQueries({ queryKey: QK.pipelineJobs })
       // 同步任务结束后 regime 覆盖范围可能变化, 一并刷新画像
       qc.invalidateQueries({ queryKey: QK.regimeCoverage })
+      // 同步完成后数据已更新, 刷新质量校验报告
+      qc.invalidateQueries({ queryKey: QK.dataQuality })
       const t = setTimeout(() => setActiveJobId(null), 5_000)
       return () => clearTimeout(t)
     }
@@ -936,6 +939,9 @@ export function Data() {
             )}
           </div>
         </div>
+
+        {/* 数据质量 */}
+        <QualityPanel />
 
         {startSync.isError && (
           <div className="rounded-btn border border-danger/40 bg-danger/5 px-3 py-2 text-sm text-danger">

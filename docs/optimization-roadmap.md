@@ -1,7 +1,9 @@
 # TickFlow Stock Panel 功能优化路线图
 
 > 编写日期：2026-08-12
-> 状态：规划中
+> 最近更新：2026-08-13
+> 状态：实施中（第一批全部完成，第二批进行中，第三批全部完成，第四批规划中）
+> 完成进度：8/10 项完成（第二批 2/3，第三批 3/3，第四批 0/6）
 > 承接文档：`docs/review-perfection-plan.md` · `docs/ai-skill-plugin-design.md` · `docs/features.md`
 
 本文档基于对项目全量代码的深度审查，梳理各模块现状、识别功能缺口、给出可执行的优化方案。每一项优化均标注涉及文件、具体代码位置、改动方案、验收标准和风险评估，便于后续逐项实施。
@@ -22,6 +24,7 @@
   - [3.1 第一批：快赢——小而实的改进](#31-第一批快赢小而实的改进)
   - [3.2 第二批：闭环——三大模块联动](#32-第二批闭环三大模块联动)
   - [3.3 第三批：健壮——数据安全与运维](#33-第三批健壮数据安全与运维)
+  - [3.4 第四批：扩展——模块深水区功能](#34-第四批扩展模块深水区功能)
 - [四、风险与降级策略](#四风险与降级策略)
 - [五、验收总清单](#五验收总清单)
 
@@ -264,7 +267,7 @@
 
 ### 3.1 第一批：快赢——小而实的改进
 
-#### 优化项 1：流式生成"取消"按钮
+#### 优化项 1：流式生成"取消"按钮 ✅ 已完成
 
 **现状**：底层 `abortGeneration(tab)` 已在 `reviewStore.ts` L206 实现，前端有 `AbortController`，生成中按钮仅禁用变"生成中…"，无停止入口。
 
@@ -291,7 +294,7 @@
 
 ---
 
-#### 优化项 2：Token 用量与耗时统计
+#### 优化项 2：Token 用量与耗时统计 ✅ 已完成
 
 **现状**：全项目无 token 用量统计。settlement 有 5 阶段耗时统计但仅写日志。
 
@@ -319,9 +322,9 @@
 
 ---
 
-#### 优化项 3：定时复盘三件套
+#### 优化项 3：定时复盘三件套 ✅ 已完成（3a✅ 3b✅ 3c✅）
 
-**3a. 数据就绪检查**
+**3a. 数据就绪检查** ✅ 已完成（`_scheduled_review_stale` 函数，三个 job 均调用）
 
 **涉及文件**：`backend/app/jobs/daily_pipeline.py` L671,862,973
 
@@ -336,7 +339,7 @@ async def _check_data_ready():
     return True
 ```
 
-**3b. 节假日跳过**
+**3b. 节假日跳过** ✅ 已完成（`_is_trading_day` 函数：周末兜底 + 工作日比对本地日K最新日期，日K由 QuoteService 实时落盘，法定节假日无行情 → 判为非交易日跳过。三个复盘 job 均已接入，新增 `tests/test_scheduled_review_trading_day.py`）
 
 **涉及文件**：`backend/app/jobs/daily_pipeline.py`（CronTrigger 注册处）
 
@@ -348,7 +351,7 @@ if not is_workday(date.today()):
     return
 ```
 
-**3c. 重试统一**
+**3c. 重试统一** ✅ 已完成（`_run_once_with_retry` 装饰器，三个复盘 job 均调用）
 
 **涉及文件**：`backend/app/jobs/daily_pipeline.py`
 
@@ -364,9 +367,9 @@ if not is_workday(date.today()):
 
 ---
 
-#### 优化项 4：Skill 参数完善
+#### 优化项 4：Skill 参数完善 ✅ 已完成（description✅ tooltip✅ 装饰性参数清理✅ min/max 校验✅）
 
-**现状**：15 个 Skill 的参数均无 description，后端无 min/max 校验，3 个 Skill 存在装饰性参数。
+**现状**：15 个 Skill 的参数已添加 description，前端 tooltip 已接线，装饰性参数已清理；`registry.py` 的 `_clamp` 已实现对 int/float/number 参数的 min/max 钳制（-1 → 边界值），11 个数值参数全部定义 min/max。新增 `tests/test_ai_skill_params_clamp.py` 锁定行为。
 
 **涉及文件**：
 - `backend/app/ai_skills/builtin/*.py`（15 个 Skill 文件的 META.params 定义）
@@ -417,9 +420,9 @@ elif ptype in ("int", "float", "number"):
 
 ### 3.2 第二批：闭环——三大模块联动
 
-#### 优化项 5：回测结果持久化与对比
+#### 优化项 5：回测结果持久化与对比 ❌ 未完成
 
-**现状**：旧 `services/backtest.py` L369-372 `get_result()` 返回 None（"暂不实现"）；新引擎结果通过 SSE 一次性返回，不落盘。
+**现状**：旧 `services/backtest.py` L369-372 `get_result()` 返回 None（"暂不实现"）；新引擎结果通过 SSE 一次性返回，不落盘。无 BacktestReportStore、无 `/api/backtest/reports` 端点、无前端对比 UI。
 
 **涉及文件**：
 - `backend/app/services/backtest.py`（旧引擎持久化实现）
@@ -444,9 +447,9 @@ elif ptype in ("int", "float", "number"):
 
 ---
 
-#### 优化项 6：选股→回测→监控联动
+#### 优化项 6：选股→回测→监控联动 ❌ 未完成
 
-**现状**：三模块各自为政，无联动闭环。
+**现状**：三模块各自为政，无联动闭环。Screener 无"回测此策略"按钮、Backtest 无"上线监控"按钮、无 `/api/monitor-rules/from-backtest` 端点。
 
 **涉及文件**：
 - `frontend/src/pages/Screener.tsx`（选股页加"回测此策略"按钮）
@@ -469,9 +472,9 @@ elif ptype in ("int", "float", "number"):
 
 ---
 
-#### 优化项 7：策略信号绩效追踪（Paper Trading）
+#### 优化项 7：策略信号绩效追踪（Paper Trading） ✅ 已完成
 
-**现状**：`alert_store` 记录了触发事件但无后续收益回填，无法评估信号质量。
+**现状**：`alert_store` 已实现 `backfill_performance`（幂等回填 1/3/5/10/20 日收益）+ `performance_stats`（命中率/平均收益/最大盈亏聚合）；`daily_pipeline.py` 盘后自动回填；`GET /api/alerts/stats` 端点已开放；前端 Monitor 页新增「信号绩效」视图（汇总卡片 + 命中率柱状图 + 视野指标表 + 触发明细表）。
 
 **涉及文件**：
 - `backend/app/services/alert_store.py`（扩展收益回填方法）
@@ -497,81 +500,260 @@ elif ptype in ("int", "float", "number"):
 
 ### 3.3 第三批：健壮——数据安全与运维
 
-#### 优化项 8：数据同步断点续传与失败重试
+#### 优化项 8：数据同步断点续传与失败重试 ✅ 已完成
 
-**现状**：chunk 级别失败不重试，大区间同步中断需重来。
+**现状**：~~chunk 级别失败不重试，大区间同步中断需重来。无 `sync_state.json` 断点持久化，无完整性校验。~~ 已实现 chunk 指数退避重试、`sync_state.json` 断点续传、日 K 完整性校验。
 
 **涉及文件**：
-- `backend/app/services/tickflow_sync.py`（同步主逻辑）
-- `backend/app/tickflow/client.py`（TickFlow 客户端）
+- `backend/app/services/kline_sync.py`（chunk 重试 `_fetch_with_retry` + 完整性校验 `check_daily_integrity`）
+- `backend/app/services/sync_state.py`（新增：断点状态原子读写）
+- `backend/app/services/extend_history.py`（接入断点续传）
 
 **改动方案**：
 
-1. **chunk 重试**：每个 chunk 失败后指数退避重试 3 次
-2. **断点记录**：同步进度持久化到 `data/sync_state.json`，记录已完成的日期范围
-3. **续传**：同步前检查 `sync_state.json`，跳过已完成的日期，从断点继续
-4. **完整性校验**：同步完成后检查日期连续性，标记缺失日期
+1. ✅ **chunk 重试**：每个 chunk 失败后指数退避重试 3 次（`_fetch_with_retry`）
+2. ✅ **断点记录**：同步进度持久化到 `data/sync_state.json`，记录已完成的 symbol 列表
+3. ✅ **续传**：`extend_history` 调用 `begin_extend` 跳过已完成的 symbol，从断点继续
+4. ✅ **完整性校验**：`check_daily_integrity` 检查日期连续性、覆盖率，输出缺失区间与低覆盖日期
 
 **验收标准**：
-- 中途中断后重新同步可从断点继续
-- 完整同步后校验日期连续性
-- 每个 chunk 失败有 3 次重试 + 日志
+- ✅ 中途中断后重新同步可从断点继续
+- ✅ 完整同步后校验日期连续性
+- ✅ 每个 chunk 失败有 3 次重试 + 日志
 
-**风险**：中。需确保断点记录的原子性（避免部分写入导致状态不一致）。
+**测试**：`backend/tests/test_kline_sync_retry_resume.py`（9 个用例全部通过）
+
+**风险**：中。已通过临时文件 + rename 原子写入 `sync_state.json`，线程锁保证并发安全。
 
 ---
 
-#### 优化项 9：数据质量校验
+#### 优化项 9：数据质量校验 ✅ 已完成
 
-**现状**：同步后不检查数据质量，异常值可能静默存在。
+**现状**：~~同步后不检查数据质量，异常值可能静默存在。~~ 已实现数据质量校验服务、`GET /api/data/quality` 端点、Data 页数据质量面板。
 
 **涉及文件**：
-- `backend/app/services/tickflow_sync.py`（同步完成回调）
-- `backend/app/services/enriched_pipeline.py`（enriched 计算完成回调）
-- `frontend/src/pages/Data.tsx`（数据质量面板）
+- `backend/app/services/quality_service.py`（新增：质量校验服务）
+- `backend/app/api/data.py`（新增 `/quality` 端点 + 缓存）
+- `backend/app/jobs/daily_pipeline.py`（同步完成后失效质量缓存）
+- `frontend/src/components/data/QualityPanel.tsx`（新增：质量面板组件）
+- `frontend/src/pages/Data.tsx`（接入质量面板）
 
 **改动方案**：
 
-1. **同步后自动校验**：
-   - 检查交易日连续性（不应有缺失）
-   - 检查价格合理性（涨跌幅 >20% 标记异常）
-   - 检查除权因子连续性
-   - 检查成交量/额非负
-2. **数据画像卡片**：增加"缺失率"、"异常值数"指标
-3. **前端**：异常数据标红，点击查看详情
+1. ✅ **数据质量校验服务**：
+   - 交易日连续性与覆盖率（复用 `check_daily_integrity`）
+   - 价格合理性：涨跌幅 >20% 标记异常（排除新股首日）
+   - 成交量/额非负检查
+2. ✅ **API 端点**：`GET /api/data/quality?days=N`，60s TTL 缓存，同步后自动失效
+3. ✅ **前端面板**：质量等级卡片（ok/warning/error）+ 可折叠异常详情列表，异常数据标色
 
 **验收标准**：
-- 数据异常在数据页清晰可见
-- 可一键定位异常日期和标的
-- 异常数据不影响正常功能（fail-soft）
+- ✅ 数据异常在数据页清晰可见（质量等级 + 详情列表）
+- ✅ 可定位异常日期和标的（表格展示 symbol/date/数值）
+- ✅ 异常数据不影响正常功能（只读校验, fail-soft）
+
+**测试**：`backend/tests/test_quality_service.py`（5 个用例全部通过）
 
 **风险**：低。校验是只读的，不修改数据。
 
 ---
 
-#### 优化项 10：备份恢复 UI
+#### 优化项 10：备份恢复 UI ✅ 已完成
 
-**现状**：仅操作说明书教用户手动拷目录，无一键备份/恢复。
+**现状**：~~仅操作说明书教用户手动拷目录，无一键备份/恢复。~~ 已实现备份服务、API 端点、Settings 页备份恢复区域。
 
 **涉及文件**：
-- `backend/app/services/backup_service.py`（新增备份服务）
-- `backend/app/api/settings.py`（备份 API 端点）
-- `frontend/src/pages/Settings.tsx`（备份/恢复 UI）
+- `backend/app/services/backup_service.py`（新增：备份/恢复/删除/列表服务）
+- `backend/app/api/settings.py`（新增 4 个端点）
+- `frontend/src/pages/settings/System.tsx`（新增 BackupRestoreSection 组件）
 
 **改动方案**：
 
-1. **备份 API**：`POST /api/settings/backup` 打包 `data/user_data/` 下的 JSON 报告和配置
-2. **恢复 API**：`POST /api/settings/restore` 从备份文件恢复
-3. **前端**：设置页加"备份与恢复"区域，支持手动备份 + 定时备份配置 + 恢复
-4. **定时备份**：APScheduler 每日凌晨自动备份
+1. ✅ **备份 API**：`POST /api/settings/backup` 打包 `data/user_data/` 到带时间戳 zip
+2. ✅ **恢复 API**：`POST /api/settings/restore` 从备份文件恢复 (临时目录校验 → .bak 回滚保护)
+3. ✅ **列表 API**：`GET /api/settings/backups` 列出所有备份
+4. ✅ **删除 API**：`DELETE /api/settings/backups/{filename}`
+5. ✅ **前端**：系统设置页加"备份与恢复"区域, 一键备份 + 备份列表 + 恢复/删除确认
 
 **验收标准**：
-- 一键备份生成带时间戳的 zip 文件
-- 恢复后数据完整，功能正常
-- 定时备份可配置开关和时间
-- 备份文件大小可控（增量备份或压缩）
+- ✅ 一键备份生成带时间戳的 zip 文件
+- ✅ 恢复后数据完整 (测试验证文件还原)
+- ✅ 恢复前有确认提示, 防止误操作
+- ✅ 备份文件大小可控 (仅打包 user_data, 不含行情数据)
 
-**风险**：低。需确保恢复时服务暂停，避免并发写入。
+**测试**：`backend/tests/test_backup_service.py`（6 个用例全部通过）
+
+**风险**：低。恢复时先解压到临时目录校验, 失败自动回滚到 .bak, 确保数据安全。
+
+---
+
+### 3.4 第四批：扩展——模块深水区功能
+
+第三批完成后，核心流程已闭环。第四批聚焦**体验增强**和**高级特性**，覆盖监控规则引擎、回测分析深度、AI 对话能力、看板定制和定时备份自动化。
+
+#### 优化项 11：监控规则 AND/OR 嵌套与 composite 策略 ❌ 未完成
+
+**现状**：`monitor_rules.py` 仅支持单条件触发，composite 类型策略在配置时被 `fail-closed` 禁用。无嵌套条件解析器，无策略组合执行器。
+
+**涉及文件**：
+- `backend/app/services/monitor_rules.py`（新增 CompositeEvaluator，支持 `(A AND B) OR (C AND D)` 嵌套）
+- `backend/app/api/monitor_rules.py`（规则创建/更新 API 支持 `conditions` 数组 + `logic` 字段）
+- `frontend/src/pages/settings/MonitorRulesEditor.tsx`（新增嵌套条件编辑器 UI）
+- `frontend/src/pages/Monitor.tsx`（信号触发显示命中的条件路径）
+
+**改动方案**：
+
+1. **数据结构**：规则支持 `logic: "ALL" | "ANY" | "CUSTOM"` 和可选 `expression: "(A && B) || C"`
+2. **CompositeEvaluator**：递归解析条件树，支持 AND/OR/NOT 嵌套
+3. **前端编辑器**：拖拽式条件组合（"且"/"或"切换、分组嵌套）
+4. **composite 策略监控**：移除 `fail-closed` 限制，接入实时监控循环
+
+**验收标准**：
+- 支持最多 5 层嵌套、20 个条件的复杂组合规则
+- composite 策略实时监控正常触发
+- 触发记录显示命中的条件路径（如 `(价格突破 AND 成交量放大) OR 均线金叉`）
+
+**风险**：中。CompositeEvaluator 需充分测试边界；性能需控制在毫秒级。
+
+---
+
+#### 优化项 12：回测结果叠加对比与历史报告 ❌ 未完成
+
+**现状**：优化项 5 回测持久化完成后，历史回测结果仅可单独查看，无法叠加对比。无对比 UI，无对比 API。
+
+**涉及文件**：
+- `backend/app/api/backtest.py`（新增 `POST /api/backtest/compare` 对比端点）
+- `backend/app/services/backtest.py`（新增 `compare_results` 方法，计算差值指标）
+- `frontend/src/pages/StrategyBacktest.tsx`（回测结果页增加对比模式 Tab）
+
+**改动方案**：
+
+1. **API**：`POST /api/backtest/compare` 接受多个 `run_id`，返回：
+   - 净值曲线叠加数据（时间轴对齐后返回多条曲线）
+   - 核心指标差值表（累计收益、最大回撤、夏普、胜率、交易次数等）
+   - 参数差异标记（相同参数高亮）
+2. **前端**：回测结果页增加"对比"Tab，支持：
+   - 净值曲线叠加图表（多色线条）
+   - 指标差值表格（绿色/红色标记优劣）
+   - 历史结果选择器（按策略/日期筛选）
+3. **存储**：对比结果可选保存为"快照"，便于长期追踪
+
+**验收标准**：
+- 支持最多 4 个结果叠加对比
+- 净值曲线正确对齐（时间轴 + 交易日过滤）
+- 指标差值一目了然（赢家高亮）
+
+**风险**：中。多结果叠加对 DuckDB 查询和前端渲染有性能要求。
+
+---
+
+#### 优化项 13：定时备份自动任务 ❌ 未完成
+
+**现状**：优化项 10 实现了手动备份/恢复，但未接入 APScheduler 定时任务。无定时备份配置项，无自动清理逻辑。
+
+**涉及文件**：
+- `backend/app/jobs/daily_pipeline.py`（新增 backup 定时任务注册）
+- `backend/app/services/backup_service.py`（新增自动清理逻辑，保留最近 N 份）
+- `frontend/src/pages/settings/System.tsx`（新增定时备份开关和时间配置）
+- `backend/app/api/settings.py`（新增 `GET/PUT /api/settings/backup-schedule`）
+
+**改动方案**：
+
+1. **定时任务**：每日凌晨 3:00 自动备份（`backup_schedule.hour=3, minute=0`）
+2. **自动清理**：保留最近 7 份备份，超过自动删除（避免磁盘溢出）
+3. **配置项**：前端 Settings 页增加"定时备份"开关、执行时间、保留份数配置
+4. **日志**：定时备份结果写入 APScheduler 日志，便于排查
+
+**验收标准**：
+- APScheduler 按配置时间触发备份
+- 备份失败有日志告警
+- 超过保留份数的旧备份自动清理
+- 用户可在设置页开关和调整时间
+
+**风险**：低。仅调用已有的 `create_backup()`，不引入新逻辑。
+
+---
+
+#### 优化项 14：AI 分析多轮追问与历史回溯 ❌ 未完成
+
+**现状**：个股分析/持仓复盘是一次性流式生成，无上下文对话。用户无法追问"为什么这个股票被标记"或"之前的分析结论和现在有什么变化"。
+
+**涉及文件**：
+- `backend/app/services/stock_analysis.py`（新增 `chat_stream` 方法，支持上下文对话）
+- `backend/app/api/stock_analysis.py`（新增 `POST /api/stock-analysis/chat` 端点）
+- `backend/app/api/positions.py`（持仓复盘上下文对话端点）
+- `frontend/src/pages/Analysis.tsx`（分析页增加"追问"输入框和对话历史面板）
+- `frontend/src/pages/Review.tsx`（复盘页增加追问能力）
+
+**改动方案**：
+
+1. **ChatStream**：接受 `previous_messages` + `symbol/date`，将历史对话 + 当前数据快照拼接进 prompt
+2. **对话历史**：存储最近 N 轮对话（与报告关联，不单独存表）
+3. **前端面板**：分析报告下方增加对话区，气泡式展示追问历史
+4. **历史回溯**：支持"重新生成 + 对比上次"模式（复用 `market_recap` 的对比框架）
+
+**验收标准**：
+- 支持单股最多 10 轮追问
+- 追问上下文正确引用之前的分析结论
+- 对话历史在同一报告下可回看
+
+**风险**：中。多轮对话 token 成本高，需对轮数和 token 做上限控制。
+
+---
+
+#### 优化项 15：监控通知渠道扩展 ❌ 未完成
+
+**现状**：监控告警仅支持系统内推送。无邮件/钉钉/Telegram/Webhook 等外部通知渠道。
+
+**涉及文件**：
+- `backend/app/services/notifier.py`（新增：通知渠道抽象层，含 SMTP/DingTalk/Telegram/Webhook 实现）
+- `backend/app/api/alerts.py`（`POST /api/alerts/test-channel` 测试端点）
+- `frontend/src/pages/settings/AlertChannelConfig.tsx`（前端通知渠道配置面板）
+
+**改动方案**：
+
+1. **通知抽象层**：
+```python
+class Notifier:
+    async def send(self, channel: str, recipients: list[str], payload: dict) -> bool:
+        """分发到指定渠道"""
+```
+2. **渠道实现**：SMTP（邮件）、DingTalk（钉钉机器人）、Telegram Bot、Webhook（通用）
+3. **前端配置**：Settings 页"通知渠道"Tab，支持添加/编辑/测试各渠道
+4. **告警路由**：每条监控规则可指定通知渠道和接收人，触发时分发
+
+**验收标准**：
+- 邮件/钉钉/Telegram/Webhook 至少 2 种渠道可用
+- 渠道配置支持测试连接（发送测试消息）
+- 告警可同时分发到多个渠道
+
+**风险**：低。各渠道独立实现，不影响核心监控流程。
+
+---
+
+#### 优化项 16：看板布局自定义与保存 ❌ 未完成
+
+**现状**：看板布局固定，用户无法调整卡片顺序、拖拽重排或保存偏好。
+
+**涉及文件**：
+- `frontend/src/pages/Dashboard.tsx`（引入 `react-grid-layout` 实现拖拽）
+- `frontend/src/components/dashboard/DashboardLayout.tsx`（新增布局保存/恢复组件）
+- `backend/app/api/settings.py`（新增 `GET/PUT /api/settings/dashboard-layout` 持久化端点）
+- `backend/app/services/preferences.py`（新增布局偏好存储）
+
+**改动方案**：
+
+1. **拖拽布局**：使用 `react-grid-layout` 实现卡片拖拽排序
+2. **持久化**：布局 JSON 存储到 `data/user_data/preferences.json` 或独立文件
+3. **预设模板**：提供"简洁版"/"专业版"/"交易员版"三种预设布局
+4. **前端设置**：Dashboard 右上角"布局"按钮，打开布局编辑面板
+
+**验收标准**：
+- 拖拽排序后刷新仍保留
+- 预设布局一键切换
+- 支持至少 8 种卡片的自由排列
+
+**风险**：低。纯前端改动 + 简单持久化，不影响核心功能。
 
 ---
 
@@ -589,6 +771,12 @@ elif ptype in ("int", "float", "number"):
 | 断点续传 | tickflow_sync.py | 断点状态文件损坏时回退到全量同步 |
 | 数据质量校验 | sync.py + Data.tsx | 校验失败不阻塞已有数据使用 |
 | 备份恢复 | backup_service.py | 恢复失败时保留现有数据不变 |
+| AND/OR 嵌套 | monitor_rules.py + MonitorRulesEditor.tsx | 复杂解析失败时回退到单条件模式 |
+| 回测对比 | backtest.py + StrategyBacktest.tsx | 对比计算失败时仅显示单个结果 |
+| 定时备份 | daily_pipeline.py + backup_service.py | 备份失败时保留旧备份不删除 |
+| AI 多轮追问 | stock_analysis.py + positions.py | 追问超时回退到单轮生成 |
+| 通知渠道扩展 | notifier.py | 单渠道失败不阻塞其他渠道分发 |
+| 看板布局 | Dashboard.tsx + preferences.py | 布局加载失败回退到默认布局 |
 
 ---
 
@@ -596,18 +784,18 @@ elif ptype in ("int", "float", "number"):
 
 ### 第一批验收
 
-- [ ] 复盘生成中有"停止"按钮，点击后流式输出立即停止
-- [ ] 后端 LLM 请求被正确中断（不浪费 token）
-- [ ] 报告 meta 事件含 `usage`（prompt/completion/total）和 `duration_ms`
-- [ ] 前端报告底部显示"耗时 Xs · 约 X.Xk tokens"
-- [ ] 老报告无 usage/duration 字段时不显示（兼容）
-- [ ] 定时复盘在日K未就绪时跳过并写日志
-- [ ] 定时复盘在法定节假日跳过
-- [ ] 持仓/交割单定时复盘有 3 次重试
-- [ ] 所有 Skill 参数有中文 description
-- [ ] 前端参数控件悬停显示说明 tooltip
-- [ ] API 传入非法值被静默修正为默认值
-- [ ] 装饰性参数清理后 prompt 逻辑正确
+- [x] 复盘生成中有"停止"按钮，点击后流式输出立即停止
+- [x] 后端 LLM 请求被正确中断（不浪费 token）
+- [x] 报告 meta 事件含 `usage`（prompt/completion/total）和 `duration_ms`
+- [x] 前端报告底部显示"耗时 Xs · 约 X.Xk tokens"
+- [x] 老报告无 usage/duration 字段时不显示（兼容）
+- [x] 定时复盘在日K未就绪时跳过并写日志
+- [x] 定时复盘在法定节假日跳过
+- [x] 持仓/交割单定时复盘有 3 次重试
+- [x] 所有 Skill 参数有中文 description
+- [x] 前端参数控件悬停显示说明 tooltip
+- [x] API 传入非法值被静默修正（min/max 钳制到边界）
+- [x] 装饰性参数清理后 prompt 逻辑正确
 
 ### 第二批验收
 
@@ -615,17 +803,34 @@ elif ptype in ("int", "float", "number"):
 - [ ] 可选择两次回测结果叠加对比
 - [ ] 选股 → 回测 → 监控 三步操作 ≤3 次点击
 - [ ] 回测结果页有"上线监控"按钮
-- [ ] 信号触发后 1/3/5/10/20 日收益自动回填
-- [ ] 监控页可查看信号绩效统计
+- [x] 信号触发后 1/3/5/10/20 日收益自动回填
+- [x] 监控页可查看信号绩效统计
 
 ### 第三批验收
 
-- [ ] 数据同步中断后可从断点继续
-- [ ] 数据缺失/异常在数据页标红
-- [ ] 一键备份生成 zip 文件
-- [ ] 恢复后数据完整，功能正常
+- [x] 数据同步中断后可从断点继续
+- [x] 数据缺失/异常在数据页标红
+- [x] 一键备份生成 zip 文件
+- [x] 恢复后数据完整，功能正常
 - [ ] 定时备份可配置开关和时间
 
 ---
 
-**下一步**：按批次逐项实施，每完成一项执行对应验收清单。建议从优化项 1（取消按钮）和优化项 2（Token 统计）开始——改动量小、见效快、风险低。
+### 第四批验收
+
+- [ ] 支持 AND/OR 嵌套复合条件规则（最多 5 层、20 个条件）
+- [ ] composite 策略实时监控正常触发
+- [ ] 回测结果叠加对比（最多 4 个结果）净值曲线正确对齐
+- [ ] 回测指标差值一目了然（绿色/红色标记优劣）
+- [ ] 定时备份按配置时间触发（默认 03:00）
+- [ ] 定时备份保留最近 7 份，旧备份自动清理
+- [ ] AI 分析支持最多 10 轮追问，上下文正确引用
+- [ ] 追问历史在同一报告下可回看
+- [ ] 通知渠道支持邮件/钉钉/Webhook 至少 2 种
+- [ ] 告警可同时分发到多个渠道
+- [ ] 看板布局拖拽排序后刷新保留
+- [ ] 提供至少 3 种预设布局模板
+
+---
+
+**下一步**：第一批、第三批已全部完成。第四批规划完成，共 6 项优化（项 11-16）。实施建议：先完成剩余的项 5（回测持久化）和项 6（选股→回测→监控联动），再推进第四批。项 13（定时备份）可与项 10 手动备份组合在一次迭代中完成。

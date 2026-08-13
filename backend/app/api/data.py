@@ -618,6 +618,50 @@ def status(request: Request) -> dict:
     }
 
 
+# ===== 数据质量校验缓存 (优化项 9) =====
+_quality_cache: dict | None = None
+_quality_cache_ts: float = 0.0
+_quality_lock = threading.Lock()
+_QUALITY_TTL = 60.0  # 质量扫描较重, 60s TTL
+
+
+@router.get("/quality")
+def data_quality(request: Request, days: int | None = None) -> dict:
+    """数据质量校验报告 (只读, 不修改数据)。
+
+    Query params:
+      days: 检查最近 N 天 (默认 365)
+    """
+    global _quality_cache, _quality_cache_ts
+
+    now = time.time()
+    with _quality_lock:
+        if _quality_cache is not None and (now - _quality_cache_ts) < _QUALITY_TTL:
+            return _quality_cache
+
+    from datetime import date, timedelta
+
+    from app.services.quality_service import check_data_quality
+
+    repo = request.app.state.repo
+    lookback = days if days and days > 0 else 365
+    start = date.today() - timedelta(days=lookback)
+    report = check_data_quality(repo, start=start)
+
+    with _quality_lock:
+        _quality_cache = report
+        _quality_cache_ts = time.time()
+    return report
+
+
+def invalidate_quality_cache() -> None:
+    """同步完成后清除质量缓存, 令下次请求重新扫描。"""
+    global _quality_cache, _quality_cache_ts
+    with _quality_lock:
+        _quality_cache = None
+        _quality_cache_ts = 0.0
+
+
 @router.post("/clear")
 def clear_data(request: Request):
     """清除所有本地 Parquet 数据（保留 capabilities.json 和目录结构）。"""
@@ -686,6 +730,7 @@ def clear_data(request: Request):
 
     logger.info("数据已清除: 删除 %d 个 parquet 文件", deleted)
     invalidate_data_cache(None)
+    invalidate_quality_cache()
     return {"deleted_files": deleted}
 
 

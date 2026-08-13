@@ -1604,3 +1604,51 @@ def update_settlement_review_push(req: ReviewPushIn) -> dict:
     from app.services import preferences
     saved = preferences.set_settlement_review_push_channels(req.channels)
     return {"settlement_review_push_channels": saved}
+
+
+# ===== 备份与恢复 (优化项 10) =====
+
+
+@router.post("/backup")
+def create_backup() -> dict:
+    """一键备份 user_data/ 到带时间戳的 zip 文件。"""
+    from app.services.backup_service import create_backup as _create
+    return _create()
+
+
+@router.get("/backups")
+def list_backups() -> dict:
+    """列出所有备份文件。"""
+    from app.services.backup_service import list_backups as _list
+    return {"backups": _list()}
+
+
+@router.post("/restore")
+def restore_backup(req: Request, body: dict) -> dict:
+    """从指定备份文件恢复 user_data/。
+
+    Body: {"filename": "backup_20260813_153000.zip"}
+    """
+    filename = body.get("filename", "")
+    if not filename:
+        raise HTTPException(status_code=400, detail="缺少 filename 参数")
+
+    from app.services.backup_service import restore_backup as _restore
+    try:
+        return _restore(filename)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/backups/{filename}")
+def delete_backup(filename: str) -> dict:
+    """删除指定备份文件。"""
+    from app.services.backup_service import delete_backup as _delete
+    try:
+        return _delete(filename)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))

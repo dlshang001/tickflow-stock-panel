@@ -1217,6 +1217,13 @@ export interface WecomBotStatus {
   last_error: string
 }
 
+export interface BackupInfo {
+  filename: string
+  size_mb: number
+  file_count?: number
+  created_at: string
+}
+
 export interface Preferences {
   realtime_quotes_enabled: boolean
   indices_nav_pinned: boolean
@@ -1350,6 +1357,20 @@ export const api = {
     request<{ ok: boolean }>('/api/settings/ai', { method: 'DELETE' }),
 
   preferences: () => request<Preferences>('/api/settings/preferences'),
+  createBackup: () =>
+    request<BackupInfo>('/api/settings/backup', { method: 'POST' }),
+  listBackups: () =>
+    request<{ backups: BackupInfo[] }>('/api/settings/backups'),
+  restoreBackup: (filename: string) =>
+    request<{ restored_files: number; filename: string }>('/api/settings/restore', {
+      method: 'POST',
+      body: JSON.stringify({ filename }),
+    }),
+  deleteBackup: (filename: string) =>
+    request<{ deleted: string }>(
+      `/api/settings/backups/${encodeURIComponent(filename)}`,
+      { method: 'DELETE' },
+    ),
   dataSources: () => request<DataSourcesResponse>('/api/settings/data-sources'),
   dataSource: (name: string) => request<CustomSourceConfig>(`/api/settings/data-sources/${encodeURIComponent(name)}`),
   saveDataSource: (config: CustomSourceConfig) =>
@@ -2094,6 +2115,8 @@ export const api = {
     ),
 
   dataStatus: () => request<DataStatus>('/api/data/status'),
+  dataQuality: (days?: number) =>
+    request<DataQualityReport>(`/api/data/quality${days ? `?days=${days}` : ''}`),
   dataClear: () => request<{ deleted_files: number }>('/api/data/clear', { method: 'POST' }),
   refreshCache: () => request<{ ok: boolean }>('/api/data/refresh-cache', { method: 'POST' }),
   enrichedSchema: (table: string) => request<EnrichedField[]>(`/api/data/schema/${table}`),
@@ -2950,6 +2973,50 @@ export interface DataStatus {
   last_instruments_run: string | null
   checked_at: string
   indicators_ready?: boolean
+}
+
+export interface DataQualityReport {
+  integrity: {
+    dates: number
+    date_start: string | null
+    date_end: string | null
+    max_coverage: number
+    missing_gaps: string[]
+    missing_gap_count: number
+    low_coverage_dates: string[]
+    low_coverage_count: number
+    error?: string
+  }
+  price_anomalies: {
+    anomalies: Array<{
+      symbol: string
+      date: string
+      close: number
+      prev_close: number
+      pct_change: number
+    }>
+    count: number
+    error?: string
+  }
+  negative_volume: {
+    records: Array<{
+      symbol: string
+      date: string
+      volume: number | null
+      amount: number | null
+    }>
+    count: number
+    error?: string
+  }
+  summary: {
+    grade: 'ok' | 'warning' | 'error'
+    total_issues: number
+    anomaly_count: number
+    gap_count: number
+    low_coverage_count: number
+    checked_range_start: string
+    checked_range_end: string
+  }
 }
 
 export interface EnrichedField {

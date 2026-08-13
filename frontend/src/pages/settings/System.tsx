@@ -4,8 +4,8 @@
  * 独立于实时监控, 放置影响整体应用行为的开关项。
  */
 import { useState, useCallback, useEffect } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
-import { Settings2, Trash2, RefreshCw, Bell, Volume2, Info } from 'lucide-react'
+import { useQueryClient, useQuery, useMutation } from '@tanstack/react-query'
+import { Settings2, Trash2, RefreshCw, Bell, Volume2, Info, Archive, RotateCcw, Download, AlertTriangle } from 'lucide-react'
 import { usePreferences, useVersion } from '@/lib/useSharedQueries'
 import { api } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
@@ -318,6 +318,8 @@ export function SettingsSystemPanel() {
         </div>
       </section>
 
+      <BackupRestoreSection />
+
       <section className="rounded-card border border-border bg-surface p-5 mt-6">
         <div className="flex items-center gap-2 mb-4">
           <Info className="h-4 w-4 text-accent" />
@@ -352,6 +354,170 @@ export function SettingsSystemPanel() {
         </div>
       </section>
     </>
+  )
+}
+
+
+// ===== 备份与恢复 =====
+
+function BackupRestoreSection() {
+  const qc = useQueryClient()
+  const [confirmRestore, setConfirmRestore] = useState<string | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+
+  const backups = useQuery({
+    queryKey: QK.backups,
+    queryFn: () => api.listBackups(),
+    staleTime: 10_000,
+  })
+
+  const createBackup = useMutation({
+    mutationFn: () => api.createBackup(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: QK.backups }),
+  })
+
+  const restoreBackup = useMutation({
+    mutationFn: (filename: string) => api.restoreBackup(filename),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: QK.backups })
+      qc.invalidateQueries()  // 恢复后全量刷新, 数据已变更
+      setConfirmRestore(null)
+    },
+  })
+
+  const deleteBackup = useMutation({
+    mutationFn: (filename: string) => api.deleteBackup(filename),
+    onSuccess: () => qc.invalidateQueries({ queryKey: QK.backups }),
+    onSettled: () => setConfirmDelete(null),
+  })
+
+  return (
+    <section className="rounded-card border border-border bg-surface p-5 mt-6">
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <Archive className="h-4 w-4 text-accent" />
+          <h3 className="text-sm font-medium text-foreground">备份与恢复</h3>
+        </div>
+        <button
+          onClick={() => createBackup.mutate()}
+          disabled={createBackup.isPending}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn text-xs
+                     bg-accent/10 text-accent hover:bg-accent/20 transition-colors
+                     disabled:opacity-50 shrink-0"
+        >
+          {createBackup.isPending ? (
+            <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <Download className="h-3.5 w-3.5" />
+          )}
+          {createBackup.isPending ? '备份中…' : '立即备份'}
+        </button>
+      </div>
+
+      <div className="text-[11px] text-muted mb-3">
+        备份持仓、自选股、监控规则、AI 报告等用户数据 (不含行情数据, 行情可重新同步)
+      </div>
+
+      {/* 备份列表 */}
+      {backups.isLoading ? (
+        <div className="text-xs text-muted py-4 text-center">加载中…</div>
+      ) : backups.data && backups.data.backups.length > 0 ? (
+        <div className="space-y-1.5">
+          {backups.data.backups.map((b) => (
+            <div
+              key={b.filename}
+              className="flex items-center justify-between gap-3 px-3 py-2 rounded-btn bg-base/40 border border-border/50"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-mono text-foreground truncate">{b.filename}</div>
+                <div className="text-[11px] text-muted">
+                  {new Date(b.created_at).toLocaleString('zh-CN', {
+                    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+                  })}
+                  {' · '}
+                  {b.size_mb.toFixed(2)} MB
+                  {b.file_count != null ? ` · ${b.file_count} 文件` : ''}
+                </div>
+              </div>
+
+              {confirmRestore === b.filename ? (
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <span className="text-[11px] text-danger flex items-center gap-1">
+                    <AlertTriangle className="h-3 w-3" />
+                    确认恢复?
+                  </span>
+                  <button
+                    onClick={() => restoreBackup.mutate(b.filename)}
+                    disabled={restoreBackup.isPending}
+                    className="px-2 py-1 rounded-btn text-[11px] bg-danger/10 text-danger hover:bg-danger/20 transition-colors"
+                  >
+                    {restoreBackup.isPending ? '恢复中…' : '确认'}
+                  </button>
+                  <button
+                    onClick={() => setConfirmRestore(null)}
+                    disabled={restoreBackup.isPending}
+                    className="px-2 py-1 rounded-btn text-[11px] bg-elevated text-muted hover:text-foreground transition-colors"
+                  >
+                    取消
+                  </button>
+                </div>
+              ) : confirmDelete === b.filename ? (
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <span className="text-[11px] text-danger">确认删除?</span>
+                  <button
+                    onClick={() => deleteBackup.mutate(b.filename)}
+                    disabled={deleteBackup.isPending}
+                    className="px-2 py-1 rounded-btn text-[11px] bg-danger/10 text-danger hover:bg-danger/20 transition-colors"
+                  >
+                    删除
+                  </button>
+                  <button
+                    onClick={() => setConfirmDelete(null)}
+                    disabled={deleteBackup.isPending}
+                    className="px-2 py-1 rounded-btn text-[11px] bg-elevated text-muted hover:text-foreground transition-colors"
+                  >
+                    取消
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    onClick={() => setConfirmRestore(b.filename)}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-[11px]
+                               text-secondary hover:text-accent hover:bg-accent/5 transition-colors"
+                  >
+                    <RotateCcw className="h-3 w-3" />
+                    恢复
+                  </button>
+                  <button
+                    onClick={() => setConfirmDelete(b.filename)}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-btn text-[11px]
+                               text-muted hover:text-danger hover:bg-danger/5 transition-colors"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="text-xs text-muted py-4 text-center">
+          暂无备份 — 点击"立即备份"创建第一个备份
+        </div>
+      )}
+
+      {createBackup.isError && (
+        <div className="mt-2 text-xs text-danger">
+          备份失败: {String((createBackup.error as any)?.message ?? '')}
+        </div>
+      )}
+      {restoreBackup.isError && (
+        <div className="mt-2 text-xs text-danger">
+          恢复失败: {String((restoreBackup.error as any)?.message ?? '')}
+        </div>
+      )}
+    </section>
   )
 }
 
