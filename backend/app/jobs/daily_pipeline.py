@@ -703,6 +703,26 @@ def _scheduled_review_stale(repo) -> bool:
     return False
 
 
+def _is_trading_day(repo) -> bool:
+    """今天是否 A 股交易日 (定时复盘节假日跳过)。
+
+    判据:
+      - 周末必非交易日 (Cron 已排除周末, 此处为兜底)。
+      - 工作日: 本地最新日K日期 >= 今天 视为交易日。日K由 QuoteService 交易时段
+        实时落盘 (flush_live_daily), 收盘后当天即有; 法定节假日无行情可写, 最新
+        日K停留在上一交易日 → 判为非交易日, 跳过复盘。
+      - 读不到数据时保守返回 True (不跳过), 交由 _scheduled_review_stale 兜底。
+    """
+    today = date.today()
+    if today.weekday() >= 5:
+        return False
+    try:
+        latest = repo.latest_daily_date()
+    except Exception:  # noqa: BLE001
+        return True
+    return latest is None or latest >= today
+
+
 async def _run_once_with_retry(coro_factory, max_attempts: int = 3):
     """非流式复盘(持仓/交割单)统一重试: coro_factory 每次返回 (content, meta)。
 
@@ -737,6 +757,11 @@ async def _run_scheduled_review(repo) -> None:
 
         # 数据就绪检查: 长假/数据管道异常时跳过, 避免在过期数据上生成复盘
         if _scheduled_review_stale(repo):
+            return
+
+        # 节假日跳过: 非交易日不生成复盘 (周末已被 Cron 排除, 这里处理法定节假日)
+        if not _is_trading_day(repo):
+            logger.info("scheduled review skipped: today is not a trading day")
             return
 
 
@@ -942,6 +967,11 @@ async def _run_scheduled_position_review(repo) -> None:
         if _scheduled_review_stale(repo):
             return
 
+        # 节假日跳过: 非交易日不生成复盘
+        if not _is_trading_day(repo):
+            logger.info("scheduled position review skipped: today is not a trading day")
+            return
+
         pos_rows = positions.list_rows()
         if not pos_rows:
             logger.info("scheduled position review skipped: no positions")
@@ -1058,6 +1088,11 @@ async def _run_scheduled_settlement_review(repo) -> None:
 
         # 数据就绪检查: 数据过期时跳过
         if _scheduled_review_stale(repo):
+            return
+
+        # 节假日跳过: 非交易日不生成分析
+        if not _is_trading_day(repo):
+            logger.info("scheduled settlement review skipped: today is not a trading day")
             return
 
         records = settlement.all_records()
