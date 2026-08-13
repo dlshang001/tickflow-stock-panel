@@ -176,6 +176,163 @@ def count(data_dir: Path) -> int:
         return 0
 
 
+# ================================================================
+# 信号绩效追踪 (Paper Trading)
+# ================================================================
+
+# 回填的后续交易日收益视野 (触发后 N 日)
+_HORIZONS = (1, 3, 5, 10, 20)
+
+
+def list_all(data_dir: Path) -> list[dict]:
+    """读取全部记录(不按时间截断), 用于绩效回填。持锁读。"""
+    p = _path(data_dir)
+    if not p.exists():
+        return []
+    out: list[dict] = []
+    try:
+        with _lock, p.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except Exception:
+                    continue
+                out.append(ev)
+    except Exception as e:
+        logger.warning("alert_store list_all failed: %s", e)
+        return []
+    return out
+
+
+def _forward_returns(bars: list, baseline: float, horizons: tuple) -> dict:
+    """由升序日K序列与触发价计算后续 N 日收益(百分比)。
+
+    bars: [(date, close)] 升序, 含触发日。bars[0] 为触发日收盘,
+    bars[h] 为触发后第 h 根。数据不足时对应视野为 None。
+    """
+    out: dict = {}
+    n = len(bars)
+    for h in horizons:
+        if h < n:
+            out[f"pnl_{h}d"] = round((bars[h][1] / baseline - 1) * 100, 2)
+        else:
+            out[f"pnl_{h}d"] = None
+    return out
+
+
+def backfill_performance(data_dir: Path, repo) -> dict:
+    """盘后回填监控信号绩效: 为有 symbol 的告警计算触发后 N 日收益并落盘。
+
+    幂等且每次全量重算 —— 随着日K累计, 更长的视野(10/20 日)会逐步被填上;
+    已回填的视野也会因最新行情刷新而被更新。无 symbol 的批次事件跳过。
+    返回 {"total","updated","skipped"}。
+    """
+    from datetime import datetime
+
+    events = list_all(data_dir)
+    if not events:
+        return {"total": 0, "updated": 0, "skipped": 0}
+
+    today = datetime.now().date()
+    total = len(events)
+    updated = 0
+    skipped = 0
+    by_symbol: dict[str, list[tuple[dict, object]]] = {}
+
+    for ev in events:
+        sym = ev.get("symbol")
+        if not sym:
+            skipped += 1
+            continue
+        try:
+            td = datetime.fromtimestamp(ev["ts"] / 1000).date()
+        except Exception:  # noqa: BLE001
+            skipped += 1
+            continue
+        by_symbol.setdefault(sym, []).append((ev, td))
+
+    for sym, items in by_symbol.items():
+        min_date = min(td for _, td in items)
+        try:
+            df = repo.get_daily(sym, min_date, today, columns=["date", "close"])
+            bars = sorted(
+                ((r["date"], float(r["close"])) for r in df.iter_rows(named=True)),
+                key=lambda x: x[0],
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("backfill: get_daily %s failed: %s", sym, e)
+            bars = []
+        for ev, td in items:
+            if not bars:
+                continue
+            baseline = ev.get("price")
+            if not baseline:
+                skipped += 1
+                continue
+            sub = [b for b in bars if b[0] >= td]
+            if not sub:
+                continue
+            for key, pct in _forward_returns(sub, float(baseline), _HORIZONS).items():
+                ev[key] = pct
+            updated += 1
+
+    with _lock:
+        _write_all_locked(data_dir, events)
+    return {"total": total, "updated": updated, "skipped": skipped}
+
+
+def performance_stats(
+    data_dir: Path,
+    days: int = MAX_DAYS,
+    source: str | None = None,
+    rule_id: str | None = None,
+) -> dict:
+    """聚合监控信号绩效: 命中率 / 平均收益 / 最大盈亏, 按 1/3/5/10/20 日视野。
+
+    仅统计有 symbol 且已回填的告警。视野数据不足时 count=0。
+    """
+    events = list_recent(data_dir, days=days, limit=MAX_RECORDS, source=source)
+    if rule_id:
+        events = [e for e in events if e.get("rule_id") == rule_id]
+
+    tracked = [e for e in events if e.get("symbol")]
+    horizons: dict = {}
+    for h in _HORIZONS:
+        key = f"pnl_{h}d"
+        vals = [e[key] for e in tracked if e.get(key) is not None]
+        n = len(vals)
+        if n == 0:
+            horizons[str(h)] = {"count": 0}
+            continue
+        pos = [v for v in vals if v > 0]
+        horizons[str(h)] = {
+            "count": n,
+            "hit_rate": round(len(pos) / n * 100, 1),
+            "avg_pnl": round(sum(vals) / n, 2),
+            "max_gain": round(max(vals), 2),
+            "max_loss": round(min(vals), 2),
+        }
+    return {
+        "horizons": horizons,
+        "tracked": len(tracked),
+        "total": len(events),
+    }
+
+
+def _write_all_locked(data_dir: Path, events: list[dict]) -> None:
+    """(调用方需持锁) 全量重写 alerts.jsonl。"""
+    p = _path(data_dir)
+    try:
+        with p.open("w", encoding="utf-8") as f:
+            for ev in events:
+                f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("alert_store write_all failed: %s", e)
+
+
 def _prune_locked(p: Path) -> None:
     """(调用方需持锁) 保留近 MAX_DAYS 天 + 上限 MAX_RECORDS 条。"""
     import time

@@ -897,6 +897,28 @@ export interface AlertEvent {
   [key: string]: unknown
 }
 
+/** 单个视野的绩效聚合 (触发后 N 日) */
+export interface AlertHorizonStat {
+  count: number
+  /** 命中率(正收益占比, 百分比) */
+  hit_rate?: number
+  /** 平均收益(百分比) */
+  avg_pnl?: number
+  /** 最大盈利(百分比) */
+  max_gain?: number
+  /** 最大亏损(百分比) */
+  max_loss?: number
+}
+
+/** 信号绩效统计结果 */
+export interface AlertStats {
+  horizons: Record<string, AlertHorizonStat>
+  /** 已追踪(有 symbol)的告警数 */
+  tracked: number
+  /** 命中筛选的告警总数 */
+  total: number
+}
+
 /** 生成监控规则 id (时间戳 + 随机后缀), 用户无需手动填写。 */
 export function genRuleId(): string {
   const ts = Date.now().toString(36)
@@ -2722,6 +2744,15 @@ export const api = {
 
   alertsClear: () =>
     request<{ ok: boolean; cleared: number }>('/api/alerts', { method: 'DELETE' }),
+
+  alertStats: (params?: { days?: number; source?: string; ruleId?: string }) => {
+    const qs = new URLSearchParams()
+    if (params?.days) qs.set('days', String(params.days))
+    if (params?.source) qs.set('source', params.source)
+    if (params?.ruleId) qs.set('rule_id', params.ruleId)
+    const s = qs.toString()
+    return request<AlertStats>(`/api/alerts/stats${s ? `?${s}` : ''}`)
+  },
 
   alertDelete: (ts: number) =>
     request<{ ok: boolean }>(`/api/alerts/${ts}`, { method: 'DELETE' }),

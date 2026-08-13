@@ -91,6 +91,7 @@ export const QK = {
   monitorRules: ['monitor-rules'] as const,
   monitorRuleOptions: ['monitor-rule-options'] as const,
   alerts: (source?: string) => ['alerts', source ?? ''] as const,
+  alertStats: (days?: number, source?: string) => ['alert-stats', String(days ?? ''), source ?? ''] as const,
 
   // AI 大盘复盘
   reviewReports: ['review-reports'] as const,

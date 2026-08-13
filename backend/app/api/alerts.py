@@ -46,6 +46,23 @@ def list_alerts(
     return {"alerts": events, "total": total}
 
 
+@router.get("/stats")
+def alert_stats(
+    request: Request,
+    days: int = 7,
+    source: str | None = None,
+    rule_id: str | None = None,
+):
+    """监控信号绩效统计: 触发后 1/3/5/10/20 日命中率 / 平均收益 / 最大盈亏。
+
+    依赖每日盘后 backfill_performance 回填的 pnl_*d 字段;
+    数据未回填或样本不足时对应视野 count=0。
+    """
+    return alert_store.performance_stats(
+        _data_dir(request), days=days, source=source, rule_id=rule_id,
+    )
+
+
 @router.delete("")
 def clear_alerts(request: Request):
     """清空全部触发记录。"""

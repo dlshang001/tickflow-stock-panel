@@ -1230,6 +1230,15 @@ def start_scheduler(repo: KlineRepository, capset: CapabilitySet) -> AsyncIOSche
             # 仍需刷进内存缓存, 否则 live_agg 基准列停留在旧交易日。放 finally 保证部分
             # 成功也生效; 随后异常继续上抛, 由 _run_tracked 标记任务 failed。
             repo.refresh_cache()
+
+        # 盘后: 回填监控信号绩效(基于当日同步的日K, 计算触发后 N 日收益)。
+        # 失败静默降级, 不影响管道主结果。
+        try:
+            from app.services import alert_store
+            result["alert_perf"] = alert_store.backfill_performance(repo.store.data_dir, repo)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("alert performance backfill failed: %s", e)
+
         return result
 
     scheduler.add_job(

@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion, AnimatePresence } from 'framer-motion'
-import { AlertTriangle, RadioTower, Plus, Trash2, Settings2, Zap, Bell, ListChecks, BellRing, TrendingUp, TrendingDown, Flame, Tags } from 'lucide-react'
+import { AlertTriangle, RadioTower, Plus, Trash2, Settings2, Zap, Bell, ListChecks, BellRing, TrendingUp, TrendingDown, Flame, Tags, Activity } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { Skeleton } from '@/components/data/Skeleton'
@@ -16,6 +16,7 @@ import { LEGACY_STRATEGY_NOTIFY_EVENTS, STRATEGY_NOTIFY_EVENT_OPTIONS, strategyE
 import { boardTag } from '@/components/stock-table/primitives'
 import { markSeen, resetBadge, leaveMonitorPage } from '@/lib/monitorBadge'
 import { RuleEditor } from '@/components/monitor/RuleEditor'
+import { PerformancePanel } from '@/components/monitor/PerformancePanel'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { DimensionMembersDialog, type DimensionKind, type DimensionMembersTarget } from '@/components/DimensionMembersDialog'
 import { usePreferences } from '@/lib/useSharedQueries'
@@ -120,6 +121,12 @@ export function Monitor() {
   const [confirmClear, setConfirmClear] = useState(false)
   const [confirmClearRules, setConfirmClearRules] = useState(false)
 
+  // 视图切换: 触发记录 / 信号绩效
+  const [view, setView] = useState<'alerts' | 'perf'>('alerts')
+  // 绩效面板筛选
+  const [perfDays, setPerfDays] = useState(7)
+  const [perfSource, setPerfSource] = useState('')
+
   // 全局 ext 字段配置 (监控中心个股通知带行业/概念标签)
   const { data: prefs } = usePreferences()
   const monitorExtFields = prefs?.monitor_ext_fields ?? {
@@ -135,7 +142,7 @@ export function Monitor() {
   const alertsQuery = useQuery({
     queryKey: [...QK.alerts(filter === 'all' ? undefined : filter), extColumnsParam ?? ''],
     queryFn: () => api.alertsList({ days: 7, limit: 500, source: filter === 'all' ? undefined : filter, extColumns: extColumnsParam }),
-    refetchInterval: 10000,
+    refetchInterval: view === 'alerts' ? 10000 : false,
     refetchIntervalInBackground: true,
   })
   const total = alertsQuery.data?.total ?? 0
@@ -170,6 +177,40 @@ export function Monitor() {
     <div className="flex flex-col h-full">
       <PageHeader title="监控中心" subtitle="实时信号与规则管理" />
       <div className="flex-1 min-h-0 px-5 py-4">
+        {/* 视图切换: 触发记录 / 信号绩效 */}
+        <div className="mx-auto mb-3 flex max-w-7xl items-center gap-1">
+          {([
+            { key: 'alerts', label: '触发记录', icon: BellRing },
+            { key: 'perf', label: '信号绩效', icon: Activity },
+          ] as const).map(t => (
+            <button
+              key={t.key}
+              onClick={() => setView(t.key)}
+              className={cn(
+                'inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-all cursor-pointer',
+                view === t.key
+                  ? 'bg-accent/15 text-accent'
+                  : 'text-muted hover:bg-elevated/60 hover:text-secondary',
+              )}
+            >
+              <t.icon className="h-4 w-4" />
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {view === 'perf' ? (
+          <div className="mx-auto h-full max-w-7xl overflow-hidden rounded-xl border border-border bg-surface/40 shadow-lg shadow-black/5">
+            <div className="min-h-0 h-full overflow-auto p-4">
+              <PerformancePanel
+                days={perfDays}
+                source={perfSource}
+                onDaysChange={setPerfDays}
+                onSourceChange={setPerfSource}
+              />
+            </div>
+          </div>
+        ) : (
         <div className="mx-auto flex h-full max-w-7xl flex-col gap-4 lg:flex-row">
           {/* 左栏: 触发记录 */}
           <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-surface/40 shadow-lg shadow-black/5">
@@ -249,6 +290,7 @@ export function Monitor() {
             </div>
           </section>
         </div>
+        )}
       </div>
 
       <RuleEditorDialog
