@@ -278,19 +278,79 @@ _KLINE_KEEP_COLS = [
 # 流式分析入口
 # ================================================================
 
+def _load_sector_context(repo, symbol: str) -> dict:
+    """加载板块联动数据(仅 sector_beta skill 需要)。
+
+    复用 stock_ai_analyzer 的维度查询、板块元数据提取、主线提取逻辑,
+    以及 build_rps_rotation 的 120s 缓存。任何异常降级为空数据。
+    """
+    from app.services.stock_ai_analyzer import (
+        _load_symbol_dimensions,
+        extract_block_meta,
+        get_current_main_line,
+        _ROTATION_DAYS,
+    )
+    from app.services.rps_rotation import build_rps_rotation
+
+    dims = _load_symbol_dimensions(repo, symbol)
+
+    try:
+        rotation_industry = build_rps_rotation(repo, _ROTATION_DAYS, "industry", 2)
+    except Exception:
+        logger.warning("build_rps_rotation industry failed for %s", symbol, exc_info=True)
+        rotation_industry = {"dates": [], "columns": {}, "concept_count": 0}
+
+    try:
+        rotation_concept = build_rps_rotation(repo, _ROTATION_DAYS, "concept")
+    except Exception:
+        logger.warning("build_rps_rotation concept failed for %s", symbol, exc_info=True)
+        rotation_concept = {"dates": [], "columns": {}, "concept_count": 0}
+
+    industry_meta = None
+    if dims["industry_level2"]:
+        industry_meta = extract_block_meta(rotation_industry, dims["industry_level2"])
+
+    concept_metas: list[dict] = []
+    if dims["concepts"]:
+        for concept_name in dims["concepts"][:15]:
+            meta = extract_block_meta(rotation_concept, concept_name)
+            if meta["strength"] is not None:
+                concept_metas.append(meta)
+        concept_metas.sort(key=lambda x: x["strength"] or -999, reverse=True)
+
+    main_lines: list[dict] = []
+    try:
+        main_lines = get_current_main_line(rotation_concept, top_n=5)
+    except Exception:
+        logger.warning("get_current_main_line failed for %s", symbol, exc_info=True)
+
+    return {
+        "dims": dims,
+        "industry_meta": industry_meta,
+        "concept_metas": concept_metas,
+        "main_lines": main_lines,
+    }
+
+
 async def analyze_stock_stream(
     repo,
     data_dir: Path,
     symbol: str,
     focus: str = "",
+    skill_id: str | None = None,
+    skill_params: dict | None = None,
 ) -> AsyncIterator[str]:
     """流式个股分析:yield 出每个 NDJSON 事件。
 
     协议(与 financial_analyzer 一致,前端解析无差异):
-      {"type":"meta","symbol","summary","levels"}  数据 + 价位摘要
+      {"type":"meta","symbol","summary","levels","skill_id","skill_name"}
       {"type":"delta","content":"..."}             逐 chunk 文本
       {"type":"error","message":"..."}
       {"type":"done"}
+
+    Args:
+        skill_id: 可选 AI Skill ID(category="stock");不传则使用内置默认 prompt。
+        skill_params: Skill 专属参数。
     """
     # 1. 加载 K 线
     df = _load_kline(repo, symbol)
@@ -310,28 +370,77 @@ async def analyze_stock_stream(
         # 3. 财务(辅助)
         fins = _load_financials(data_dir, symbol)
 
-        # 4. meta
-        yield json.dumps({
+        # 4. K 线清洗
+        kline_tail = _clean_rows(df, _KLINE_KEEP_COLS)
+        asset_type = repo.resolve_asset_type(symbol)
+
+        # 5. 解析 Skill(可选); 无 skill_id 时使用内置默认 prompt
+        resolved_skill_id = None
+        resolved_skill_name = None
+        system_prompt = _SYSTEM_PROMPT
+
+        if skill_id:
+            from app.ai_skills import registry
+            try:
+                skill = registry.get_skill(skill_id)
+                if skill.meta.get("category") != "stock":
+                    raise ValueError(
+                        f"Skill {skill_id}(类别 {skill.meta.get('category')}) "
+                        f"不适用于个股分析,期望 category=stock"
+                    )
+                params = registry.validate_params(skill.meta, skill_params)
+                context: dict = {
+                    "symbol": symbol,
+                    "kline_tail": kline_tail,
+                    "kline_window": _KLINE_WINDOW,
+                    "levels": levels,
+                    "close": close,
+                    "financials": fins,
+                    "focus": focus,
+                    "asset_type": asset_type,
+                }
+                # sector_beta skill 需要额外注入板块联动数据
+                if skill_id == "stock_sector_beta":
+                    context.update(_load_sector_context(repo, symbol))
+
+                system_prompt, user_prompt = skill.run(params, context)
+                resolved_skill_id = skill.meta.get("id") or skill_id
+                resolved_skill_name = skill.meta.get("name")
+            except Exception as e:
+                logger.warning("skill %s failed, fallback to default: %s", skill_id, e)
+                user_prompt = _build_user_prompt(
+                    kline_tail, fins, levels, close, symbol, focus,
+                    asset_type=asset_type,
+                )
+        else:
+            user_prompt = _build_user_prompt(
+                kline_tail, fins, levels, close, symbol, focus,
+                asset_type=asset_type,
+            )
+
+        # 6. meta
+        meta_event: dict = {
             "type": "meta",
             "symbol": symbol,
             "summary": summarize_levels(levels, close),
             "levels": levels,
             "close": close,
-        }, ensure_ascii=False)
+        }
+        if resolved_skill_id:
+            meta_event["skill_id"] = resolved_skill_id
+            meta_event["skill_name"] = resolved_skill_name
+        yield json.dumps(meta_event, ensure_ascii=False)
 
-        # 5+6. 构建提示词 + 流式调用 LLM
+        # 7. 流式调用 LLM
         from app.services.ai_provider import stream_ai_text
 
-        kline_tail = _clean_rows(df, _KLINE_KEEP_COLS)
-        user_prompt = _build_user_prompt(kline_tail, fins, levels, close, symbol, focus,
-                                         asset_type=repo.resolve_asset_type(symbol))
         async for delta in stream_ai_text(
             [
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.5,
-            max_tokens=8192,
+            max_tokens=16384,
         ):
             yield json.dumps({"type": "delta", "content": delta}, ensure_ascii=False)
 

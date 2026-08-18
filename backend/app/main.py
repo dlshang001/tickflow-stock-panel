@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
-from app.api import analysis, auth as auth_api, backtest, damiao_pool, data, ext_data, financials, indices, intraday, kline, market_recap, monitor_rules, alerts, overview, pipeline, positions, regime, rps, screener, settlement, settings as settings_api, signals, stock_analysis, strategy, watchlist
+from app.api import analysis, auth as auth_api, backtest, damiao_pool, data, ext_data, financials, indices, intraday, kline, market_recap, monitor_rules, alerts, overview, pipeline, positions, regime, rps, screener, settlement, settings as settings_api, signals, stock_ai, stock_analysis, strategy, watchlist
 from app.api.routes import router as core_router
 from app.config import settings
 from app.jobs import daily_pipeline
@@ -369,6 +369,7 @@ app.include_router(monitor_rules.router)
 app.include_router(alerts.router)
 app.include_router(rps.router)
 app.include_router(settlement.router)
+app.include_router(stock_ai.router)
 
 # AI Skill 列表
 from app.api import ai_skills  # noqa: E402

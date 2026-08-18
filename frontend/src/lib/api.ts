@@ -2405,22 +2405,35 @@ export const api = {
     request<{ ok: boolean }>(`/api/stock-analysis/reports/${encodeURIComponent(reportId)}`, { method: 'DELETE' }),
 
   /**
-   * AI 个股四维分析 — 流式调用(NDJSON,与财务分析同协议)。
+   * AI 个股分析 — 流式调用(NDJSON,与财务分析同协议)。
    * meta 里额外带 levels(关键价位)供图表回放。
+   * skillId/skillParams 可选,传入对应 category="stock" 的 AI Skill。
    */
-  async *stockAnalyzeStream(symbol: string, focus?: string): AsyncGenerator<{
+  async *stockAnalyzeStream(
+    symbol: string,
+    focus?: string,
+    skillId?: string | null,
+    skillParams?: Record<string, any> | null,
+  ): AsyncGenerator<{
     type: 'meta' | 'delta' | 'error' | 'done'
     symbol?: string
     summary?: string
     levels?: Record<LevelType, PriceLevel[]>
     close?: number | null
+    skill_id?: string
+    skill_name?: string
     content?: string
     message?: string
   }> {
     const res = await fetch('/api/stock-analysis/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol, focus: focus ?? '' }),
+      body: JSON.stringify({
+        symbol,
+        focus: focus ?? '',
+        skill_id: skillId ?? null,
+        skill_params: skillParams ?? null,
+      }),
     })
     if (!res.ok) {
       let detail = ''

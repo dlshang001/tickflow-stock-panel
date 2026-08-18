@@ -149,23 +149,47 @@ class AnalyzeRequest(BaseModel):
     """AI 个股分析请求。"""
     symbol: str
     focus: str = ""  # 可选:用户追加的分析关注点
+    skill_id: str | None = None  # 可选:AI Skill ID(category="stock")
+    skill_params: dict | None = None  # 可选:Skill 专属参数
 
 
 @router.post("/analyze")
 async def analyze_stock(request: Request, req: AnalyzeRequest):
-    """AI 个股四维分析 — NDJSON 流式返回。
+    """AI 个股分析 — NDJSON 流式返回。
 
     组合 K 线(技术指标)+ 财务表 + 关键价位 → 客观技术分析提示词 →
     流式调用 LLM → 逐 chunk 以 NDJSON 推给前端(每行一个 JSON)。
+
+    可选传入 skill_id(category="stock")切换分析 skill:
+      - stock_technical(默认): 技术 / 基本面 / 财务 / 消息面四维
+      - stock_sector_beta:     技术 + 板块联动 + 筹码量能八维
     """
     if not req.symbol:
         raise HTTPException(400, "symbol 不能为空")
+
+    # Skill 预校验: 不存在或 category 不对直接 400(不静默 fallback)
+    if req.skill_id:
+        from app.ai_skills import registry
+        try:
+            skill = registry.get_skill(req.skill_id)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        if skill.meta.get("category") != "stock":
+            raise HTTPException(
+                400,
+                f"Skill {req.skill_id}(类别 {skill.meta.get('category')}) "
+                f"不适用于个股分析,期望 category=stock",
+            )
 
     repo = request.app.state.repo
     data_dir = repo.store.data_dir
 
     async def stream_gen():
-        async for chunk in analyze_stock_stream(repo, data_dir, req.symbol, req.focus):
+        async for chunk in analyze_stock_stream(
+            repo, data_dir, req.symbol, req.focus,
+            skill_id=req.skill_id,
+            skill_params=req.skill_params,
+        ):
             yield chunk + "\n"
 
     return StreamingResponse(

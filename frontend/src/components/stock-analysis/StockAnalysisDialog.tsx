@@ -12,6 +12,7 @@ import {
   type ActiveTask, type HistoryReport,
   minimizeDialog, closeDialog, startAnalysis,
 } from '@/lib/stockAnalysisStore'
+import { getSkillState } from '@/lib/aiSkillStore'
 import { useDialogBackdrop } from '@/lib/useDialogBackdrop'
 
 /**
@@ -66,7 +67,9 @@ export function StockAnalysisDialog({ task, mode, minimized }: Props) {
   const handleStartNew = useCallback(async () => {
     if (!task) return
     const name = 'name' in task ? task.name : ''
-    await startAnalysis(task.symbol, name, focus.trim())
+    // 优先沿用任务生成时的 skill;历史报告无 skillId 则取当前选择器
+    const skillId = ('skillId' in task && task.skillId) || getSkillState('stock').selectedId
+    await startAnalysis(task.symbol, name, focus.trim(), skillId)
   }, [task, focus])
 
   const handleCopy = async () => {
@@ -114,6 +117,11 @@ export function StockAnalysisDialog({ task, mode, minimized }: Props) {
                   </span>
                   {task && <span className="text-xs text-secondary truncate">{task.name}</span>}
                   {task && <span className="text-[10px] font-mono text-muted shrink-0">{task.symbol}</span>}
+                  {meta?.skill_name && (
+                    <span className="shrink-0 rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] text-sky-300 border border-sky-400/20">
+                      {meta.skill_name}
+                    </span>
+                  )}
                 </div>
                 <div className="flex items-center gap-2 mt-0.5 text-[10px] text-muted">
                   {meta?.summary ? (

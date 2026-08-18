@@ -26,7 +26,10 @@ export interface ActiveTask {
     summary?: string
     levels?: Record<LevelType, PriceLevel[]>
     close?: number | null
+    skill_id?: string
+    skill_name?: string
   } | null
+  skillId?: string | null
   createdAt: number
   savedReportId?: string
   doneAt?: number
@@ -157,7 +160,12 @@ export async function findTodayReport(symbol: string): Promise<HistoryReport | n
   return history.find(r => r.symbol === symbol && (r.created_at ?? '').slice(0, 10) === today) ?? null
 }
 
-export async function startAnalysis(symbol: string, name: string, focus = ''): Promise<{ id?: string; error?: string }> {
+export async function startAnalysis(
+  symbol: string,
+  name: string,
+  focus = '',
+  skillId?: string | null,
+): Promise<{ id?: string; error?: string }> {
   const existing = activeTasks.find(t => t.symbol === symbol && (t.phase === 'loading' || t.phase === 'streaming'))
   if (existing) {
     activeDialogTaskId = existing.id
@@ -175,7 +183,7 @@ export async function startAnalysis(symbol: string, name: string, focus = ''): P
   const task: ActiveTask = {
     id, symbol, name, focus,
     phase: 'loading', content: '', error: '',
-    meta: null, createdAt: Date.now(),
+    meta: null, skillId: skillId ?? null, createdAt: Date.now(),
   }
   activeTasks = [...activeTasks, task]
   activeDialogTaskId = id
@@ -183,19 +191,39 @@ export async function startAnalysis(symbol: string, name: string, focus = ''): P
   rebuildSnap()
   emit()
 
-  runStream(id, symbol, name, focus)
+  runStream(id, symbol, name, focus, skillId)
   return { id }
 }
 
-async function runStream(id: string, symbol: string, _name: string, focus: string) {
+async function runStream(
+  id: string,
+  symbol: string,
+  _name: string,
+  focus: string,
+  skillId?: string | null,
+) {
   try {
     let firstDelta = true
-    for await (const chunk of api.stockAnalyzeStream(symbol, focus)) {
+    // 从 skill store 读取参数(若选中了 stock category skill)
+    let skillParams: Record<string, any> | null = null
+    if (skillId) {
+      const { getSkillState } = await import('./aiSkillStore')
+      skillParams = getSkillState('stock').params ?? null
+    }
+    for await (const chunk of api.stockAnalyzeStream(symbol, focus, skillId, skillParams)) {
       const cur = activeTasks.find(t => t.id === id)
       if (!cur) return
       switch (chunk.type) {
         case 'meta':
-          patchTask(id, { meta: { summary: chunk.summary, levels: chunk.levels, close: chunk.close } })
+          patchTask(id, {
+            meta: {
+              summary: chunk.summary,
+              levels: chunk.levels,
+              close: chunk.close,
+              skill_id: chunk.skill_id,
+              skill_name: chunk.skill_name,
+            },
+          })
           break
         case 'delta':
           if (firstDelta) { patchTask(id, { phase: 'streaming' }); firstDelta = false }
@@ -256,8 +284,10 @@ export function restoreDialog(taskId: string) {
   }
   activeDialogTaskId = taskId; dialogMinimized = false; rebuildSnap(); emit()
 }
-export async function retryAnalysis(task: { symbol: string; name: string; focus: string }): Promise<{ error?: string }> {
-  return startAnalysis(task.symbol, task.name, task.focus)
+export async function retryAnalysis(task: {
+  symbol: string; name: string; focus: string; skillId?: string | null
+}): Promise<{ error?: string }> {
+  return startAnalysis(task.symbol, task.name, task.focus, task.skillId)
 }
 export async function deleteReport(reportId: string): Promise<void> {
   try {

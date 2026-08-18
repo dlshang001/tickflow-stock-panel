@@ -14,7 +14,7 @@
  */
 import { api, type SkillMeta } from '@/lib/api'
 
-export type SkillTab = 'market' | 'holdings' | 'settlement'
+export type SkillTab = 'market' | 'holdings' | 'settlement' | 'stock'
 
 export interface SkillState {
   skills: SkillMeta[]        // 该 category 可用的 skill 列表
@@ -33,6 +33,7 @@ const states: Record<SkillTab, SkillState> = {
   market: { ...INITIAL },
   holdings: { ...INITIAL },
   settlement: { ...INITIAL },
+  stock: { ...INITIAL },
 }
 
 // ===== 订阅机制 =====

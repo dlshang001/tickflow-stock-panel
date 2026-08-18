@@ -6,12 +6,14 @@ import { EmptyState } from '@/components/EmptyState'
 import { StockFinancialSearch } from '@/components/financials/StockFinancialSearch'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
 import { LastStockChip } from '@/components/LastStockChip'
+import { SkillSelector } from '@/components/review/SkillSelector'
 import { AnalysisKChart, type PriceLevel, type LevelType } from '@/components/stock-analysis/AnalysisKChart'
 import { PriceAlertDialog } from '@/components/stock-analysis/PriceAlertDialog'
 import { api } from '@/lib/api'
 import { useLastStock } from '@/lib/useLastStock'
 import { QK } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
+import { getSkillState } from '@/lib/aiSkillStore'
 import {
   startAnalysis, findTodayReport, useHistoryReports,
   deleteReport, openHistoryReport, loadHistory,
@@ -73,7 +75,8 @@ export function StockAnalysis() {
   }
 
   const doAnalysis = async () => {
-    const r = await startAnalysis(symbol, name)
+    const skillId = getSkillState('stock').selectedId
+    const r = await startAnalysis(symbol, name, '', skillId)
     if (r.error) toast(r.error, 'error')
   }
 
@@ -106,22 +109,25 @@ export function StockAnalysis() {
                 <span className="text-[10px] font-mono text-muted">{symbol}</span>
                 <ExternalLink className="h-3 w-3 text-muted opacity-0 group-hover:opacity-100 transition-opacity" />
               </button>
-              <button
-                onClick={handleAnalyze}
-                disabled={checking}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn bg-gradient-to-r from-sky-500/25 to-blue-500/15 border border-sky-400/30 text-sky-300 text-xs font-medium hover:from-sky-500/35 hover:to-blue-500/25 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                {checking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-                AI 个股分析
-              </button>
-              <button
-                onClick={() => setShowPriceAlerts(true)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn border border-sky-400/25 bg-sky-400/[0.08] text-sky-300 text-xs font-medium hover:border-sky-400/40 hover:bg-sky-400/[0.12] transition-all"
-                title="设置价格点位提醒"
-              >
-                <Bell className="h-3.5 w-3.5" />
-                点位提醒
-              </button>
+              <div className="ml-auto flex items-center gap-2">
+                <SkillSelector tab="stock" />
+                <button
+                  onClick={handleAnalyze}
+                  disabled={checking}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn bg-gradient-to-r from-sky-500/25 to-blue-500/15 border border-sky-400/30 text-sky-300 text-xs font-medium hover:from-sky-500/35 hover:to-blue-500/25 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  {checking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                  AI 个股分析
+                </button>
+                <button
+                  onClick={() => setShowPriceAlerts(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-btn border border-sky-400/25 bg-sky-400/[0.08] text-sky-300 text-xs font-medium hover:border-sky-400/40 hover:bg-sky-400/[0.12] transition-all"
+                  title="设置价格点位提醒"
+                >
+                  <Bell className="h-3.5 w-3.5" />
+                  点位提醒
+                </button>
+              </div>
             </>
           )}
         </div>
