@@ -82,9 +82,17 @@ def _load_financials(data_dir: Path, symbol: str) -> dict[str, list[dict]]:
     财务面只需要关键指标(ROE / 增速 / 毛利率 等),不需要把 4 张表全塞进上下文
     (那是 financial_analyzer 的职责)。这里取轻量,留给技术面更多 token。
     """
+    import datetime
+    import math
+
     out: dict[str, list[dict]] = {}
     for table in ("metrics", "income"):
-        df = get_financial_df(data_dir, table)
+        try:
+            df = get_financial_df(data_dir, table)
+        except Exception:
+            logger.warning("load financial table %s failed for %s", table, symbol, exc_info=True)
+            out[table] = []
+            continue
         if df.is_empty():
             out[table] = []
             continue
@@ -94,7 +102,6 @@ def _load_financials(data_dir: Path, symbol: str) -> dict[str, list[dict]]:
             continue
         if "period_end" in df.columns:
             df = df.sort("period_end", descending=True).head(2)  # 只取最近 2 期
-        import math
         rows = []
         for rec in df.to_dicts():
             clean = {}
@@ -103,6 +110,8 @@ def _load_financials(data_dir: Path, symbol: str) -> dict[str, list[dict]]:
                     continue
                 if isinstance(v, float):
                     clean[k] = None if not math.isfinite(v) else v
+                elif isinstance(v, (datetime.date, datetime.datetime)):
+                    clean[k] = v.isoformat()
                 else:
                     clean[k] = v
             rows.append(clean)
@@ -292,24 +301,25 @@ async def analyze_stock_stream(
         }, ensure_ascii=False)
         return
 
-    # 2. 价位计算(基于 K 线)
-    levels = compute_levels(df)
-    close = float(df.tail(1)["close"][0]) if "close" in df.columns else None
-
-    # 3. 财务(辅助)
-    fins = _load_financials(data_dir, symbol)
-
-    # 4. meta
-    yield json.dumps({
-        "type": "meta",
-        "symbol": symbol,
-        "summary": summarize_levels(levels, close),
-        "levels": levels,
-        "close": close,
-    }, ensure_ascii=False)
-
-    # 5+6. 构建提示词 + 流式调用 LLM(整体 try-except,任何异常都 yield error,避免前端卡死)
+    # 2-6 全流程包在 try 中: 任何异常都转成 error 事件, 避免静默断流
     try:
+        # 2. 价位计算(基于 K 线)
+        levels = compute_levels(df)
+        close = float(df.tail(1)["close"][0]) if "close" in df.columns else None
+
+        # 3. 财务(辅助)
+        fins = _load_financials(data_dir, symbol)
+
+        # 4. meta
+        yield json.dumps({
+            "type": "meta",
+            "symbol": symbol,
+            "summary": summarize_levels(levels, close),
+            "levels": levels,
+            "close": close,
+        }, ensure_ascii=False)
+
+        # 5+6. 构建提示词 + 流式调用 LLM
         from app.services.ai_provider import stream_ai_text
 
         kline_tail = _clean_rows(df, _KLINE_KEEP_COLS)
@@ -321,7 +331,7 @@ async def analyze_stock_stream(
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.5,
-            max_tokens=4500,
+            max_tokens=8192,
         ):
             yield json.dumps({"type": "delta", "content": delta}, ensure_ascii=False)
 

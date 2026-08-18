@@ -297,7 +297,11 @@ async def _stream_openai(
     model = current_ai_model()
     req_messages = list(messages)
 
+    got_content = False
+    got_reasoning_only = False
+
     async def _iter(stream):
+        nonlocal got_content, got_reasoning_only
         async for chunk in stream:
             # 取消检查:客户端断开时请求方传入的 cancel_check 返回 True
             if cancel_check is not None and await cancel_check():
@@ -308,10 +312,18 @@ async def _stream_openai(
                     usage_info["prompt_tokens"] = getattr(usage, "prompt_tokens", 0) or 0
                     usage_info["completion_tokens"] = getattr(usage, "completion_tokens", 0) or 0
                     usage_info["total_tokens"] = getattr(usage, "total_tokens", 0) or 0
+                    # 检测 reasoning tokens: 推理模型可能把所有 token 花在思考上
+                    details = getattr(usage, "completion_tokens_details", None)
+                    rt = getattr(details, "reasoning_tokens", 0) if details else 0
+                    usage_info["reasoning_tokens"] = rt or 0
                 continue
             delta = chunk.choices[0].delta if chunk.choices else None
             if delta and delta.content:
+                got_content = True
                 yield delta.content
+            elif delta and getattr(delta, "reasoning_content", None):
+                # reasoning 模型的思考过程 — 不转发给前端, 但记录以防 content 全空
+                got_reasoning_only = True
 
     async def _create(include_usage: bool):
         kwargs = _openai_kwargs(temperature=temperature, max_tokens=max_tokens)
@@ -346,6 +358,17 @@ async def _stream_openai(
         if _is_openai_transport_error(exc):
             raise RuntimeError(_format_openai_error(exc)) from exc
         raise
+
+    # 流正常结束但从未产出正文 content:
+    # reasoning 模型 (DeepSeek-R1/V4-Pro 等) 可能把全部 max_tokens 花在推理上,
+    # 导致 content 为空。给调用方明确错误而非静默空流。
+    if not got_content:
+        if got_reasoning_only:
+            raise RuntimeError(
+                "模型仅返回了推理内容(reasoning)而无正文, 可能是 max_tokens 过小 "
+                "导致思考过程耗尽了 token 预算, 请在设置中调大 max_tokens 或更换非推理模型"
+            )
+        raise RuntimeError("AI 模型未返回任何内容, 请稍后重试或检查模型配置")
 
 
 def _is_include_usage_rejected(exc: Exception) -> bool:
