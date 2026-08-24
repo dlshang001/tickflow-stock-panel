@@ -4,7 +4,11 @@ import tomllib
 
 import httpx
 import openai
+import pytest
 
+from app import secrets_store
+from app.api import settings as settings_api
+from app.config import settings
 from app.services import ai_provider
 from app.services.ai_provider import (
     _format_openai_error,
@@ -108,7 +112,7 @@ def test_is_temperature_rejected_matches_moonshot_message():
     assert _is_temperature_rejected(exc) is True
 
 
-def test_is_temperature_rejected_matches_generic_temperature_hint():
+def test_optional_openai_params_use_targeted_400_fallbacks():
     response = httpx.Response(
         400,
         json={"error": {"message": "unsupported parameter: temperature"}},
@@ -119,6 +123,29 @@ def test_is_temperature_rejected_matches_generic_temperature_hint():
         body={"error": {"message": "unsupported parameter: temperature"}},
     )
     assert _is_temperature_rejected(exc) is True
+
+    kwargs = {"max_tokens": 1000, "temperature": 0.3, "reasoning_effort": "high"}
+    assert ai_provider._openai_retry_kwargs(exc, kwargs) == {
+        "max_tokens": 1000,
+        "reasoning_effort": "high",
+    }
+
+    response = httpx.Response(
+        400,
+        json={"error": {"message": "unrecognized request argument", "param": "reasoning_effort"}},
+        request=httpx.Request("POST", "https://example.com/v1/chat/completions"),
+    )
+    exc = openai.BadRequestError(
+        "bad request", response=response,
+        body={"error": {"message": "unrecognized request argument", "param": "reasoning_effort"}},
+    )
+    assert _is_temperature_rejected(exc) is False
+    assert ai_provider._is_reasoning_effort_rejected(exc) is True
+    assert ai_provider._openai_retry_kwargs(exc, kwargs) == {
+        "max_tokens": 1000,
+        "temperature": 0.3,
+    }
+    assert kwargs == {"max_tokens": 1000, "temperature": 0.3, "reasoning_effort": "high"}
 
 
 def test_is_temperature_rejected_false_for_other_400():
@@ -143,6 +170,234 @@ def test_is_temperature_rejected_false_for_non_400():
     )
     exc = openai.AuthenticationError("unauthorized", response=response, body=None)
     assert _is_temperature_rejected(exc) is False
+
+
+def test_openai_kwargs_include_configured_reasoning_effort(monkeypatch):
+    stored = {"ai_provider": "openai_compat"}
+    monkeypatch.setattr(secrets_store, "load", lambda: stored)
+
+    assert "reasoning_effort" not in ai_provider._openai_kwargs(temperature=None, max_tokens=1000)
+
+    stored["ai_provider"] = "openai"
+    assert ai_provider._openai_kwargs(temperature=None, max_tokens=1000)["reasoning_effort"] == "high"
+
+    stored["ai_reasoning_effort"] = "custom-high"
+    kwargs = ai_provider._openai_kwargs(temperature=0.3, max_tokens=1000)
+
+    assert kwargs == {
+        "max_tokens": 1000,
+        "temperature": 0.3,
+        "reasoning_effort": "custom-high",
+    }
+
+    stored["ai_reasoning_effort"] = ""
+    assert "reasoning_effort" not in ai_provider._openai_kwargs(temperature=None, max_tokens=1000)
+
+    stored["ai_reasoning_effort"] = "custom-high"
+    stored["ai_provider"] = "openai_compat"
+    assert "reasoning_effort" not in ai_provider._openai_kwargs(temperature=None, max_tokens=1000)
+
+
+def test_openai_kwargs_none_max_tokens_omits_limit():
+    """max_tokens=None → 不传上限(推理模型思考 token 计入预算, 分析类调用放开)。"""
+    kwargs = ai_provider._openai_kwargs(temperature=0.5, max_tokens=None)
+    assert "max_tokens" not in kwargs
+    assert kwargs.get("temperature") == 0.5
+
+    # 显式数值仍正常下发(策略标题生成等小任务依赖)
+    assert ai_provider._openai_kwargs(temperature=None, max_tokens=8) == {"max_tokens": 8}
+
+
+def test_codex_prompt_none_max_tokens_skips_length_hint():
+    prompt = ai_provider._codex_prompt([{"role": "user", "content": "hi"}], max_tokens=None)
+    assert "Keep the final answer" not in prompt
+
+    bounded = ai_provider._codex_prompt([{"role": "user", "content": "hi"}], max_tokens=300)
+    assert "Keep the final answer" in bounded
+
+
+def test_ai_settings_keep_provider_models_separate(monkeypatch):
+    stored = {
+        "ai_provider": "openai_compat",
+        "ai_model": "custom-api-model",
+    }
+
+    def save(updates: dict) -> dict:
+        stored.update(updates)
+        return stored
+
+    def clear(*keys: str) -> dict:
+        for key in keys:
+            stored.pop(key, None)
+        return stored
+
+    monkeypatch.setattr(secrets_store, "load", lambda: stored)
+    monkeypatch.setattr(secrets_store, "save", save)
+    monkeypatch.setattr(secrets_store, "clear", clear)
+    monkeypatch.setattr(ai_provider, "ai_configured", lambda provider=None: True)
+    monkeypatch.setattr(settings, "ai_provider", "openai_compat")
+    monkeypatch.setattr(settings, "ai_base_url", "")
+    monkeypatch.setattr(settings, "ai_model", "")
+    monkeypatch.setattr(settings, "ai_codex_command", "codex")
+    monkeypatch.setattr(settings, "ai_codex_reasoning_effort", "")
+    monkeypatch.setattr(settings, "ai_user_agent", "")
+
+    settings_api.save_ai_settings(
+        settings_api.AiSettingsIn(
+            provider="codex_cli",
+            model="gpt-5.6-sol",
+            codex_command="codex",
+            codex_reasoning_effort="high",
+        )
+    )
+
+    assert stored["ai_model"] == "custom-api-model"
+    assert stored["ai_codex_model"] == "gpt-5.6-sol"
+
+    settings_api.save_ai_settings(
+        settings_api.AiSettingsIn(
+            provider="openai",
+            base_url="https://api.openai.com/v1",
+            model="openai-model",
+            reasoning_effort="vendor-high",
+        )
+    )
+
+    assert stored["ai_model"] == "openai-model"
+    assert stored["ai_reasoning_effort"] == "vendor-high"
+    assert stored["ai_codex_model"] == "gpt-5.6-sol"
+
+    settings_api.save_ai_settings(
+        settings_api.AiSettingsIn(
+            provider="openai_compat",
+            base_url="https://example.com/v1",
+            model="new-custom-model",
+        )
+    )
+
+    assert stored["ai_model"] == "new-custom-model"
+    assert stored["ai_reasoning_effort"] == "vendor-high"
+    assert stored["ai_codex_model"] == "gpt-5.6-sol"
+# ── 输出上限 / 上下文窗口配置 ─────────────────────────────────
+
+
+def test_resolve_max_tokens_none_stays_unlimited(monkeypatch):
+    """None = 不传上限(推理模型放开) — 不能被映射成配置上限, 见 main 语义。"""
+    monkeypatch.setattr(ai_provider, "current_ai_max_output_tokens", lambda: 8192)
+    assert ai_provider._resolve_max_tokens(None) is None
+
+
+def test_resolve_max_tokens_clamps_above_cap(monkeypatch):
+    monkeypatch.setattr(ai_provider, "current_ai_max_output_tokens", lambda: 3000)
+    assert ai_provider._resolve_max_tokens(9000) == 3000
+
+
+def test_resolve_max_tokens_keeps_below_cap(monkeypatch):
+    monkeypatch.setattr(ai_provider, "current_ai_max_output_tokens", lambda: 8192)
+    assert ai_provider._resolve_max_tokens(2000) == 2000
+
+
+def test_estimate_input_tokens_counts_cjk_and_ascii():
+    # 中文按 1 字 1 token
+    cjk = [{"role": "user", "content": "中文" * 100}]  # 200 字
+    assert ai_provider._estimate_input_tokens(cjk) >= 200
+    # 英文按 ~4 字符 1 token
+    ascii_msg = [{"role": "user", "content": "a" * 400}]
+    assert ai_provider._estimate_input_tokens(ascii_msg) <= 200
+
+
+def test_check_input_budget_raises_when_over_window(monkeypatch):
+    monkeypatch.setattr(ai_provider, "current_ai_context_window", lambda: 100)
+    big = [{"role": "user", "content": "中" * 200}]  # 估算输入 ~200 tokens
+    with pytest.raises(ValueError, match="上下文窗口"):
+        ai_provider._check_input_budget(big, max_tokens=3000)
+
+
+def test_check_input_budget_passes_within_window(monkeypatch):
+    monkeypatch.setattr(ai_provider, "current_ai_context_window", lambda: 64000)
+    small = [{"role": "user", "content": "中" * 100}]
+    # 不抛异常
+    ai_provider._check_input_budget(small, max_tokens=2000)
+
+
+@pytest.mark.asyncio
+async def test_generate_ai_text_clamps_max_tokens_to_config_cap(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(ai_provider, "is_codex_cli_provider", lambda: False)
+    monkeypatch.setattr(ai_provider, "current_ai_max_output_tokens", lambda: 3000)
+    monkeypatch.setattr(ai_provider, "current_ai_context_window", lambda: 64000)
+
+    async def fake_run(messages, *, temperature, max_tokens, timeout):
+        captured["max_tokens"] = max_tokens
+        return "ok"
+
+    monkeypatch.setattr(ai_provider, "_run_openai_once", fake_run)
+    text = await ai_provider.generate_ai_text(
+        [{"role": "user", "content": "hi"}], max_tokens=9000
+    )
+    assert text == "ok"
+    assert captured["max_tokens"] == 3000
+
+
+@pytest.mark.asyncio
+async def test_generate_ai_text_default_cap_and_none_passthrough(monkeypatch):
+    """默认 3000 且被钳制; 显式 None 贯穿为不限制。"""
+    captured: dict = {}
+    monkeypatch.setattr(ai_provider, "is_codex_cli_provider", lambda: False)
+    monkeypatch.setattr(ai_provider, "current_ai_max_output_tokens", lambda: 4000)
+    monkeypatch.setattr(ai_provider, "current_ai_context_window", lambda: 64000)
+
+    async def fake_run(messages, *, temperature, max_tokens, timeout):
+        captured["max_tokens"] = max_tokens
+        return "ok"
+
+    monkeypatch.setattr(ai_provider, "_run_openai_once", fake_run)
+    await ai_provider.generate_ai_text([{"role": "user", "content": "hi"}])
+    assert captured["max_tokens"] == 3000  # 默认值, 未超 cap 原样下发
+    await ai_provider.generate_ai_text(
+        [{"role": "user", "content": "hi"}], max_tokens=None,
+    )
+    assert captured["max_tokens"] is None  # None = 推理模型放开, 不钳制
+
+
+def test_save_ai_settings_persists_token_sizes(monkeypatch):
+    from app.api import settings as settings_api
+    from app.config import settings as app_settings
+
+    saved: dict = {}
+    monkeypatch.setattr(settings_api.secrets_store, "save", lambda updates: saved.update(updates))
+    monkeypatch.setattr(settings_api.secrets_store, "load", lambda: saved)
+    original_output = app_settings.ai_max_output_tokens
+    original_window = app_settings.ai_context_window
+    try:
+        req = settings_api.AiSettingsIn(
+            provider="openai_compat",
+            base_url="https://example.com/v1",
+            api_key="sk-test",
+            model="gpt-x",
+            max_output_tokens=5000,
+            context_window=128000,
+        )
+        result = settings_api.save_ai_settings(req)
+        assert saved["ai_max_output_tokens"] == 5000
+        assert saved["ai_context_window"] == 128000
+        assert result["ai_max_output_tokens"] == 5000
+        assert result["ai_context_window"] == 128000
+    finally:
+        app_settings.ai_max_output_tokens = original_output
+        app_settings.ai_context_window = original_window
+
+
+def test_save_ai_settings_rejects_non_positive(monkeypatch):
+    from app.api import settings as settings_api
+    from fastapi import HTTPException
+
+    req = settings_api.AiSettingsIn(provider="openai_compat", max_output_tokens=-1)
+    with pytest.raises(HTTPException):
+        settings_api.save_ai_settings(req)
+    req2 = settings_api.AiSettingsIn(provider="openai_compat", context_window=0)
+    with pytest.raises(HTTPException):
+        settings_api.save_ai_settings(req2)
 
 
 def test_codex_process_env_excludes_application_secrets(monkeypatch, tmp_path):
@@ -201,7 +456,7 @@ def test_codex_config_adapts_local_access_provider_for_docker(monkeypatch, tmp_p
     assert provider["supports_websockets"] is False
 
 
-def test_codex_config_does_not_copy_provider_without_docker_opt_in(monkeypatch, tmp_path):
+def test_codex_config_preserves_remote_provider_without_docker_rewrite(monkeypatch, tmp_path):
     monkeypatch.delenv("CODEX_DOCKER_HOST", raising=False)
     monkeypatch.setattr(ai_provider, "current_ai_model", lambda: "")
     monkeypatch.setattr(ai_provider, "current_codex_reasoning_effort", lambda: "")
@@ -209,11 +464,13 @@ def test_codex_config_does_not_copy_provider_without_docker_opt_in(monkeypatch, 
         ai_provider,
         "_read_codex_config",
         lambda: {
-            "model_provider": "codex_local_access",
+            "model_provider": "remote-api",
+            "openai_base_url": "https://builtin.example/v1",
             "model_providers": {
-                "codex_local_access": {
-                    "base_url": "http://localhost:62678/v1",
-                    "experimental_bearer_token": "must-not-leak",
+                "remote-api": {
+                    "base_url": "https://custom.example/v1",
+                    "wire_api": "responses",
+                    "requires_openai_auth": True,
                 }
             },
         },
@@ -222,7 +479,11 @@ def test_codex_config_does_not_copy_provider_without_docker_opt_in(monkeypatch, 
 
     ai_provider._write_compatible_codex_config(path)
 
-    text = path.read_text(encoding="utf-8")
-    assert "model_provider" not in text
-    assert "model_providers" not in text
-    assert "must-not-leak" not in text
+    with path.open("rb") as f:
+        config = tomllib.load(f)
+    assert config["model_provider"] == "remote-api"
+    assert config["openai_base_url"] == "https://builtin.example/v1"
+    provider = config["model_providers"]["remote-api"]
+    assert provider["base_url"] == "https://custom.example/v1"
+    assert provider["wire_api"] == "responses"
+    assert provider["requires_openai_auth"] is True

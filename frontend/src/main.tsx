@@ -2,8 +2,8 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { RouterProvider } from 'react-router-dom'
 import { QueryClient, QueryClientProvider, QueryCache } from '@tanstack/react-query'
-import { ThemeProvider } from '@/lib/theme'
-import { router } from './router'
+import { initializeFrontendExtensions } from './extensions/bootstrap'
+import { withBase, stripBase } from './lib/basePath'
 import './index.css'
 
 // 全局认证拦截: 任何 query/mutation 收到 401 (未登录/会话过期) → 跳登录页。
@@ -20,11 +20,12 @@ const _redirectToLogin = (() => {
     const is401 = msg.includes('未登录') || msg.includes('会话已过期') || msg.includes('401')
     const isNotInit = msg.includes('尚未初始化访问密码') || msg.includes('NOT_INITIALIZED')
     if (!is401 && !isNotInit) return
-    // 已在登录页则不跳(避免死循环)
-    if (window.location.pathname === '/login') return
+    // 已在登录页则不跳(避免死循环)。登录页路径需带上 basename 前缀。
+    if (stripBase(window.location.pathname) === '/login') return
     redirecting = true
-    const redirect = encodeURIComponent(window.location.pathname + window.location.search)
-    window.location.href = `/login?redirect=${redirect}`
+    // redirect 存「剥掉 basename 后的 router 路径」, 登录成功后可直接 navigate()。
+    const redirect = encodeURIComponent(stripBase(window.location.pathname) + window.location.search)
+    window.location.href = withBase(`/login?redirect=${redirect}`)
   }
 })()
 
@@ -43,12 +44,16 @@ const queryClient = new QueryClient({
   },
 })
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <ThemeProvider>
+async function bootstrap() {
+  await initializeFrontendExtensions()
+  const { router } = await import('./router')
+  ReactDOM.createRoot(document.getElementById('root')!).render(
+    <React.StrictMode>
+      <QueryClientProvider client={queryClient}>
         <RouterProvider router={router} />
-      </ThemeProvider>
-    </QueryClientProvider>
-  </React.StrictMode>
-)
+      </QueryClientProvider>
+    </React.StrictMode>,
+  )
+}
+
+void bootstrap()
