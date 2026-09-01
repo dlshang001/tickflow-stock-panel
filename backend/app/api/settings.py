@@ -412,6 +412,7 @@ class DataProvidersIn(BaseModel):
     daily_data_provider: str | None = None
     adj_factor_provider: str | None = None
     minute_data_provider: str | None = None
+    full_minute_data_provider: str | None = None
     depth5_data_provider: str | None = None
     realtime_data_provider: str | None = None
     financial_data_provider: str | None = None
@@ -425,6 +426,14 @@ class PluginKeyIn(BaseModel):
 class DataSourceJobTimeoutPrefs(BaseModel):
     data_source_job_timeout_s: int = Field(ge=60)
     data_source_long_job_timeout_s: int = Field(ge=60)
+
+
+class MinuteBatchCompressPrefs(BaseModel):
+    minute_batch_compress: bool
+
+
+class DailyBatchCompressPrefs(BaseModel):
+    daily_batch_compress: bool
 
 
 class DatasetFieldMapItem(BaseModel):
@@ -498,12 +507,15 @@ def get_preferences() -> dict:
         "daily_data_provider": preferences.get_daily_data_provider(),
         "adj_factor_provider": preferences.get_adj_factor_provider(),
         "minute_data_provider": preferences.get_minute_data_provider(),
+        "full_minute_data_provider": preferences.get_full_minute_data_provider(),
         "minute_history_days": _minute_history_days(),
         "depth5_data_provider": preferences.get_depth5_data_provider(),
         "realtime_data_provider": preferences.get_realtime_data_provider(),
         "financial_data_provider": preferences.get_financial_provider(),
         "data_source_job_timeout_s": preferences.get_data_source_job_timeout_s(),
         "data_source_long_job_timeout_s": preferences.get_data_source_long_job_timeout_s(),
+        "minute_batch_compress": preferences.get_minute_batch_compress(),
+        "daily_batch_compress": preferences.get_daily_batch_compress(),
         **preferences.get_realtime_quote_scope(),
         "pipeline_pull_a_share": preferences.get_pipeline_pull_a_share(),
         "pipeline_pull_etf": preferences.get_pipeline_pull_etf(),
@@ -776,6 +788,7 @@ def update_data_providers(req: DataProvidersIn, request: Request) -> dict:
         "daily_data_provider": preferences.get_daily_data_provider(),
         "adj_factor_provider": preferences.get_adj_factor_provider(),
         "minute_data_provider": preferences.get_minute_data_provider(),
+        "full_minute_data_provider": preferences.get_full_minute_data_provider(),
         "depth5_data_provider": preferences.get_depth5_data_provider(),
         "realtime_data_provider": preferences.get_realtime_data_provider(),
         "financial_data_provider": preferences.get_financial_provider(),
@@ -788,6 +801,22 @@ def update_data_source_job_timeouts(req: DataSourceJobTimeoutPrefs) -> dict:
     from app.services import preferences
     preferences.save(req.model_dump())
     return req.model_dump()
+
+
+@router.put("/preferences/minute-batch-compress")
+def update_minute_batch_compress(req: MinuteBatchCompressPrefs) -> dict:
+    """保存分时批量响应的 gzip 传输压缩开关。逐请求即时读取, 保存后立即生效。"""
+    from app.services import preferences
+    preferences.save({"minute_batch_compress": req.minute_batch_compress})
+    return {"minute_batch_compress": preferences.get_minute_batch_compress()}
+
+
+@router.put("/preferences/daily-batch-compress")
+def update_daily_batch_compress(req: DailyBatchCompressPrefs) -> dict:
+    """保存日K批量响应的 gzip 传输压缩开关 (与分时独立)。逐请求即时读取。"""
+    from app.services import preferences
+    preferences.save({"daily_batch_compress": req.daily_batch_compress})
+    return {"daily_batch_compress": preferences.get_daily_batch_compress()}
 
 
 @router.put("/preferences/mining-schedule")
