@@ -152,6 +152,11 @@ class MyProvider:
     def get_realtime(self) -> list[dict]:
         """全市场实时快照 → list[dict]。失败软返回 [], 不抛异常(不阻断轮询线程)。"""
 
+    def get_realtime_indices(self, symbols: list[str]) -> list[dict]:
+        """(可选)指数实时快照 → list[dict], 行字段与 get_realtime 一致。
+        A 股快照普遍不含指数(fuyao 的指数在独立端点); 声明 realtime 的源
+        强烈建议实现本方法, 否则指数行情冻结在本地日K兜底。失败软返回 []。"""
+
     def get_financials(self, table, symbols, latest_only=False) -> pl.DataFrame:
         """财务数据(声明 financial 数据集时实现, table 见 financial_sync 调用)。"""
 
@@ -179,11 +184,17 @@ class MyProvider:
 深历史（TickFlow 基准）。浅源（如 stock-sdk 免费分时仅保留最近 5 个交易日）声明后，
 个股分时档位自动收窄为可行选项并默认 5 日，深源默认 20 日。
 
+> **全量分钟与插件源的关系**:「全量分钟」(`intraday.universe`,盘中全市场分钟增量
+> 落盘)是独立能力,当前经 TickFlow Expert 接入、由内置服务(`minute_refresh`)执行,
+> 该数据集暂未纳入插件 loader 白名单。但配置了自定义分钟源(`minute_data_provider
+> != tickflow`)时,内置服务自动让位不启动,盘中分时由你的源经 `get_minute` 按需供给。
+
 ### 异常语义
 
 | 方法 | 失败行为 |
 | --- | --- |
 | `get_realtime` | **软失败**: 返回 `[]` + warning 日志, 保证轮询线程不中断 |
+| `get_realtime_indices` | **软失败**: 返回 `[]` + warning 日志; 指数缓存为空走日K兜底 |
 | `get_minute` | 抛异常时调用方自动回退 TickFlow 重试 |
 | `get_daily` / `get_adj_factors` / `get_financials` | 异常由上层同步流程捕获记录; 无数据返回空 DataFrame |
 

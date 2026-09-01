@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X } from 'lucide-react'
 import { api, genRuleId, type ScreenerStrategy, type ScreenerResult } from '@/lib/api'
+import { fetchMinuteBatchIncremental } from '@/lib/minuteBatchIncremental'
 import { DEFAULT_STRATEGY_NOTIFY_EVENTS } from '@/lib/strategyMonitorEvents'
 import { toast } from '@/components/Toast'
 import { useDataStatus, usePreferences, useCapabilities, useQuoteStatus } from '@/lib/useSharedQueries'
@@ -73,6 +74,15 @@ export function Screener() {
     setIntradayChartVisible(v => {
       const next = !v
       storage.screenerIntraday.set(next)
+      return next
+    })
+  }, [])
+  // 策略列标签全表展开/收起（命中多策略时行会很高；默认收起, 每行可单独展开；持久化）
+  const [strategyTagsExpanded, setStrategyTagsExpanded] = useState<boolean>(() => storage.screenerStrategyTags.get(false))
+  const toggleStrategyTags = useCallback(() => {
+    setStrategyTagsExpanded(v => {
+      const next = !v
+      storage.screenerStrategyTags.set(next)
       return next
     })
   }, [])
@@ -460,7 +470,8 @@ export function Screener() {
 
   const minuteBatch = useQuery({
     queryKey: QK.minuteBatch(intradaySymbolsKey),
-    queryFn: () => api.klineMinuteBatch(intradayRequestSymbols),
+    // 增量轮询: 读缓存以最后一根为 since 只拉新增, 本地合并为完整序列
+    queryFn: () => fetchMinuteBatchIncremental(qc, QK.minuteBatch(intradaySymbolsKey), intradayRequestSymbols),
     enabled: intradayVisible && intradayRequestSymbols.length > 0,
     staleTime: 10_000,
     placeholderData: previousData => previousData,
@@ -977,6 +988,8 @@ export function Screener() {
                     intradayAutoRefresh={intradayRefreshEnabled && realtimeRunning}
                     onRefreshIntraday={() => minuteBatch.refetch()}
                     intradayRefreshing={minuteBatch.isFetching}
+                    strategyTagsExpanded={strategyTagsExpanded}
+                    onToggleStrategyTags={toggleStrategyTags}
                     sort={sort}
                     onSortToggle={toggle}
                   />

@@ -3,7 +3,6 @@ import { useQueryClient, useMutation, useQuery } from '@tanstack/react-query'
 import {
   Activity,
   Wifi,
-  BarChart3,
   Flame,
   Zap,
   Webhook,
@@ -32,13 +31,6 @@ const PAGE_LABELS: Record<string, string> = {
   watchlist: '自选页',
   'limit-ladder': '连板梯队',
 }
-
-const SIDEBAR_INDEX_OPTIONS = [
-  { symbol: '000001.SH', name: '上证指数' },
-  { symbol: '399001.SZ', name: '深证成指' },
-  { symbol: '399006.SZ', name: '创业板指' },
-  { symbol: '000680.SH', name: '科创综指' },
-]
 
 // ===== 导出为 Panel 组件 (由 Settings.tsx 嵌入) =====
 
@@ -74,8 +66,6 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
   const rs = refreshStatus.data
   // 新建监控规则时默认勾选的推送渠道 (全局默认值数组, 单条规则可独立修改)
   const webhookDefaultChannels = prefs?.webhook_default_channels ?? []
-  const sidebarIndexSymbols = prefs?.sidebar_index_symbols ?? SIDEBAR_INDEX_OPTIONS.map(i => i.symbol)
-  const indicesPinned = prefs?.indices_nav_pinned ?? true
   const isRunning = quoteStatus?.running ?? false
   const isTrading = quoteStatus?.is_trading_hours ?? false
   // 管道/数据修正运行期间实时行情被临时暂停 — 此时禁止开启
@@ -133,20 +123,6 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
     qc.invalidateQueries({ queryKey: QK.preferences })
     qc.invalidateQueries({ queryKey: QK.quoteStatus })
   }, [toggleQuote, qc])
-
-  const toggleSidebarIndex = useCallback((symbol: string, visible: boolean) => {
-    const selected = new Set(sidebarIndexSymbols)
-    if (visible) selected.add(symbol)
-    else selected.delete(symbol)
-    const next = SIDEBAR_INDEX_OPTIONS
-      .map(item => item.symbol)
-      .filter(s => selected.has(s))
-    save({ sidebar_index_symbols: next })
-  }, [save, sidebarIndexSymbols])
-
-  const toggleIndicesPin = useCallback((pinned: boolean) => {
-    api.updateIndicesNavPinned(pinned).then(() => qc.invalidateQueries({ queryKey: QK.preferences }))
-  }, [qc])
 
   const toggleLimitLadderMonitor = useCallback(async (enabled: boolean) => {
     await api.updateLimitLadderMonitor(enabled)
@@ -386,77 +362,10 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
           </div>
         </Card>
 
-        <Card icon={BarChart3} title="左侧菜单指数">
-          <p className="text-xs text-secondary mb-4">
-            选择实时行情开启时，左侧菜单底部显示哪些指数点位和涨跌幅。
-          </p>
-          <div className="space-y-2">
-            {SIDEBAR_INDEX_OPTIONS.map(item => (
-              <ToggleRow
-                key={item.symbol}
-                label={item.name}
-                desc={item.symbol}
-                checked={sidebarIndexSymbols.includes(item.symbol)}
-                onChange={(v) => toggleSidebarIndex(item.symbol, v)}
-              />
-            ))}
-          </div>
-          <div className="mt-3 pt-3 border-t border-border">
-            <ToggleRow
-              label="固定显示"
-              desc={indicesPinned ? '指数卡片常驻显示（即使实时行情关闭）' : '跟随实时行情开关（仅实时开时显示）'}
-              checked={indicesPinned}
-              onChange={toggleIndicesPin}
-            />
-          </div>
-        </Card>
       </div>
 
       {/* ========== 右列 ========== */}
       <div className="space-y-6">
-        {/* 连板梯队降级修正 (右列顶部) */}
-        <Card
-          icon={Flame}
-          title="连板梯队降级修正"
-          anchor="depth-fix"
-          badge={!hasDepth ? '五档盘口不可用' : undefined}
-          right={hasDepth ? (
-            <button
-              onClick={() => runFix.mutate()}
-              disabled={runFix.isPending}
-              className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px]
-                         bg-accent/15 text-accent hover:bg-accent/25 transition-colors
-                         disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <Zap className="h-3 w-3" />
-              {runFix.isPending ? '修正中…' : '立即修正'}
-            </button>
-          ) : undefined}
-        >
-          {hasDepth ? (
-            <>
-              <p className="text-xs text-secondary mb-4">
-                通过五档盘口实时修正真假涨停/跌停。真封板显示封单量,假涨停(收盘价=涨停价但卖一有量)归入炸板。
-                盘中按设定间隔轮询,收盘后自动定版。
-              </p>
-              <ToggleRow
-                label="启用真假板修正"
-                desc="开启后盘中自动拉取五档盘口修正真假板"
-                checked={limitLadderMonitor}
-                onChange={toggleLimitLadderMonitor}
-              />
-              <div className="mt-4 pt-3 border-t border-border">
-                <div className="text-[10px] uppercase tracking-widest text-muted mb-3">
-                  五档盘口配置
-                </div>
-                <DepthConfigContent disabled={!limitLadderMonitor} />
-              </div>
-            </>
-          ) : (
-            <DepthConfigContent disabled />
-          )}
-        </Card>
-
         {/* 全量分钟 (TickFlow Expert 专有): 盘中全市场分钟落盘, intraday.universe 单请求增量 */}
         <Card icon={Zap} title="全量分钟" anchor="minute-refresh">
           <ToggleRow
@@ -506,6 +415,49 @@ export function SettingsMonitoringPanel({ highlight }: { highlight?: string } = 
               </div>
             )}
           </div>
+        </Card>
+
+        {/* 连板梯队降级修正 */}
+        <Card
+          icon={Flame}
+          title="连板梯队降级修正"
+          anchor="depth-fix"
+          badge={!hasDepth ? '五档盘口不可用' : undefined}
+          right={hasDepth ? (
+            <button
+              onClick={() => runFix.mutate()}
+              disabled={runFix.isPending}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px]
+                         bg-accent/15 text-accent hover:bg-accent/25 transition-colors
+                         disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Zap className="h-3 w-3" />
+              {runFix.isPending ? '修正中…' : '立即修正'}
+            </button>
+          ) : undefined}
+        >
+          {hasDepth ? (
+            <>
+              <p className="text-xs text-secondary mb-4">
+                通过五档盘口实时修正真假涨停/跌停。真封板显示封单量,假涨停(收盘价=涨停价但卖一有量)归入炸板。
+                盘中按设定间隔轮询,收盘后自动定版。
+              </p>
+              <ToggleRow
+                label="启用真假板修正"
+                desc="开启后盘中自动拉取五档盘口修正真假板"
+                checked={limitLadderMonitor}
+                onChange={toggleLimitLadderMonitor}
+              />
+              <div className="mt-4 pt-3 border-t border-border">
+                <div className="text-[10px] uppercase tracking-widest text-muted mb-3">
+                  五档盘口配置
+                </div>
+                <DepthConfigContent disabled={!limitLadderMonitor} />
+              </div>
+            </>
+          ) : (
+            <DepthConfigContent disabled />
+          )}
         </Card>
 
         {/* 推送通知 — 监控告警的外部推送渠道 (全局配置)。

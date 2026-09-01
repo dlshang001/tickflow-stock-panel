@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
@@ -43,6 +44,8 @@ import polars as pl
 
 from app.market_time import cn_now, cn_today, in_continuous_session
 from app.services import preferences
+
+logger = logging.getLogger(__name__)
 
 # 轮询间隔允许范围 (秒): 稳态轮单请求无并发脉冲, 下限 3s;
 # 上限 120s — universe 端点每标的只回最新 3 根, 间隔超过 3 分钟必留缺口,
@@ -187,6 +190,7 @@ class MinuteRefreshService:
                     continue
             except Exception as e:
                 self._state.last_error = f"round failed: {e}"
+                logger.warning("全量分钟轮次异常: %s", e)
             self._stop.wait(_LOOP_STEP_S)
 
     # ------------------------------------------------------------------
@@ -231,8 +235,11 @@ class MinuteRefreshService:
 
         t0 = time.perf_counter()
         mode = self._select_mode()
+        mode_label = "增量" if mode == "increment" else "全天修复"
         with self._round_lock:
             if mode == "increment":
+                # fetch 计时只覆盖网络取数; full 分支的 universe 维表读取不计入
+                fetch_started = time.perf_counter()
                 df, requests = kline_sync.fetch_intraday_universe_increment()
                 self._state.last_symbols = (
                     df["symbol"].n_unique() if not df.is_empty() else 0
@@ -242,18 +249,27 @@ class MinuteRefreshService:
                 self._state.last_symbols = len(symbols)
                 if not symbols:
                     self._state.last_error = "empty universe (instruments 未加载)"
+                    logger.warning("全量分钟[%s] 本轮中止: 标的池为空 (instruments 未加载)", mode_label)
                     return
                 capset = getattr(self._app_state, "capabilities", None) if self._app_state else None
+                fetch_started = time.perf_counter()
                 df, requests = kline_sync.fetch_intraday_full_market_burst(symbols, capset)
+            fetch_ms = (time.perf_counter() - fetch_started) * 1000
             self._state.last_requests = requests
             if df.is_empty():
                 self._empty_rounds += 1
                 self._state.last_error = f"intraday {mode} returned no data"
+                logger.warning(
+                    "全量分钟[%s] 本轮返回空数据: %d 请求, 取数 %.0fms",
+                    mode_label, requests, fetch_ms,
+                )
                 return
             self._empty_rounds = 0
+            write_started = time.perf_counter()
             written = kline_sync._write_minute_partition(
                 df, self._repo.store.data_dir / "kline_minute",
             )
+            write_ms = (time.perf_counter() - write_started) * 1000
 
         self._state.rounds += 1
         self._state.last_round_at = time.time()
@@ -261,6 +277,12 @@ class MinuteRefreshService:
         self._state.last_rows = written
         self._state.last_mode = mode
         self._state.last_error = None
+        logger.info(
+            "全量分钟[%s] 第 %d 轮: 取数 %.0fms (%d 请求, %d 标的), "
+            "落盘 %.0fms (%d 行), 总计 %.0fms",
+            mode_label, self._state.rounds, fetch_ms, self._state.last_requests,
+            self._state.last_symbols, write_ms, written, self._state.last_round_ms,
+        )
 
     def _universe(self) -> list[str]:
         """全市场 A 股标的 (instruments 维表, 与盘后分钟同步同一来源)。"""
@@ -272,6 +294,26 @@ class MinuteRefreshService:
     # ------------------------------------------------------------------
     # 状态
     # ------------------------------------------------------------------
+
+    def is_healthy(self) -> bool:
+        """读侧 freshness 判定: 本地 kline_minute 分区是否正被服务持续写入。
+
+        条件: 偏好开启 + 轮询线程存活 + 最近一轮距现在 ≤ max(2×间隔, 30s)。
+        健康时消费方 (自选分时等) 可信任本地分区、跳过批量补拉;
+        连续失败轮不更新 last_round_at → 自动超时判不健康, 无需单独盯 last_error。
+        """
+        try:
+            if not preferences.get_minute_refresh_enabled():
+                return False
+        except Exception:  # noqa: BLE001 — 偏好文件异常按不健康处理
+            return False
+        if self._thread is None or not self._thread.is_alive():
+            return False
+        last = self._state.last_round_at
+        if last is None:
+            return False
+        interval = preferences.get_minute_refresh_interval()
+        return (time.time() - float(last)) <= max(2.0 * interval, 30.0)
 
     def status(self) -> dict[str, Any]:
         import contextlib
