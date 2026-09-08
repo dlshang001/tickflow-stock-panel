@@ -19,6 +19,7 @@ from app.api import (
     backtest,
     data,
     ext_data,
+    factors,
     financials,
     indices,
     intraday,
@@ -104,6 +105,15 @@ async def _application_lifespan(app: FastAPI):
     repo = KlineRepository(store)
     app.state.datastore = store
     app.state.repo = repo
+    # 自定义/复合因子载入注册表 (P3); 单个失败只跳过该因子 (fail-隔离)
+    from app.factors.store import load_into_registry
+
+    try:
+        loaded_factors = load_into_registry(store.data_dir)
+        if loaded_factors:
+            logger.info("custom factors loaded: %s", len(loaded_factors))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("custom factors load failed: %s", exc)
     from app.services.mining_manager import MiningJobManager
 
     mining_manager = MiningJobManager(store.data_dir)
@@ -125,11 +135,6 @@ async def _application_lifespan(app: FastAPI):
     # instruments/index/ETF 仍同步 (毫秒级)。应用立即 ready, 指标算完后自动替换。
     repo.refresh_cache(background=True)
 
-    # 能力探测
-    capset = detect_capabilities()
-    app.state.capabilities = capset
-    logger.info("ready; %d capabilities active", len(capset.all()))
-
     # 自定义数据源配置(可选): 失败只记录错误, 不影响 TickFlow 基准路径。
     try:
         from app.data_providers import custom as custom_sources
@@ -137,6 +142,11 @@ async def _application_lifespan(app: FastAPI):
         logger.info("custom data sources loaded: %d", len(custom_sources.list_sources()))
     except Exception as e:  # noqa: BLE001
         logger.warning("custom data sources init failed: %s", e)
+
+    # 自定义源必须先注册,能力探测才能补充其数据集能力。
+    capset = detect_capabilities()
+    app.state.capabilities = capset
+    logger.info("ready; %d capabilities active", len(capset.all()))
 
     # 全局行情服务
     qs = QuoteService()
@@ -227,6 +237,10 @@ async def _application_lifespan(app: FastAPI):
     from app.services.financial_sync import financial_scheduler
     financial_scheduler.start(store.data_dir, capset)
     app.state.financial_scheduler = financial_scheduler
+
+    # 自愈看门狗: 探测 polars 闸与写锁, 僵死时退出交由 supervisor 拉起 (兜底层)。
+    from app.watchdog import start_watchdog
+    app.state.watchdog = start_watchdog(app.state, repo)
 
     # 策略引擎
     from app.strategy.engine import StrategyEngine
@@ -345,6 +359,9 @@ async def _application_lifespan(app: FastAPI):
         yield
     finally:
         repo._on_refresh_done = None  # noqa: SLF001
+        wd = getattr(app.state, "watchdog", None)
+        if wd:
+            await wd.stop()
         if not matrix_prewarm_owner.shutdown(timeout=5.0):
             logger.warning("matrix cache prewarm did not stop within 5 seconds")
         mmanager = getattr(app.state, "mining_manager", None)
@@ -455,6 +472,7 @@ app.include_router(kline.router)
 app.include_router(watchlist.router)
 app.include_router(screener.router)
 app.include_router(backtest.router)
+app.include_router(factors.router)
 app.include_router(mining.router)
 app.include_router(intraday.router)
 app.include_router(indices.router)
