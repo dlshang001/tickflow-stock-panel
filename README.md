@@ -441,25 +441,19 @@ fork同时请点个star哦,欢迎 Issue 和 PR。
 
 <div align="center">
 
-<table>
-  <tr>
-    <td width="50%" align="center">
-      <b>❤️ 支持项目</b><br/>
-      <sub>如果这个项目对你有帮助,欢迎请作者喝杯咖啡 ☕</sub>
-      <table>
-        <tr><td align="center"><img src="./assets/support/wechat-appreciation.jpg" alt="微信赞赏码 · 感谢道友支持 愿一路长红" height="280" /></td></tr>
-        <tr><td align="center"><sub>愿道友一路长红 📈</sub></td></tr>
-      </table>
-    </td>
-    <td width="50%" align="center">
-      <b>💬 交流群</b><br/>
-      <sub>欢迎加入交流群,一起讨论交流<br/>个性化接口统一公布在群公告,免费使用</sub>
-      <table>
-        <tr><td align="center"><img src="./community-qr-code.jpg" alt="交流群二维码 · 个人维护的个性化接口见群公告" height="280" /></td></tr>
-      </table>
-    </td>
-  </tr>
-</table>
+**❤️ 支持项目**<br/>
+<sub>如果这个项目对你有帮助,欢迎请作者喝杯咖啡 ☕</sub>
+
+<img src="./assets/support/wechat-appreciation.jpg" alt="微信赞赏码 · 感谢道友支持 愿一路长红" width="280" />
+
+<sub>愿道友一路长红 📈</sub>
+
+<br/>
+
+**💬 交流群**<br/>
+<sub>欢迎加入交流群,一起讨论交流<br/>个性化接口统一公布在群公告,免费使用</sub>
+
+<img src="./community-qr-code.jpg" alt="交流群二维码 · 个人维护的个性化接口见群公告" width="280" />
 
 </div>
 
