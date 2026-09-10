@@ -8,7 +8,7 @@ import math
 import os
 import re
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import date, datetime
 from typing import Any, Optional
 
@@ -536,18 +536,39 @@ def _run_all_progressive(
             params_map=params_map,
             overrides_map=overrides_map,
         )
+        # 逐策略 run_all 不会把矩阵回写 context.market → 每个矩阵策略都会重建
+        # 全市场矩阵 (小服务器上单次数秒到十余秒)。这里按字段并集一次建好复用;
+        # FakeEngine 等无该方法的实现跳过 (保持旧行为)。
+        if getattr(context, "market", None) is None:
+            build_matrix = getattr(engine, "build_shared_matrix", None)
+            if callable(build_matrix):
+                matrix = build_matrix(
+                    context,
+                    [(sid, engine.get(sid)) for sid in ordered_ids],
+                    params_map,
+                    overrides_map,
+                )
+                if matrix is not None:
+                    context = replace(context, market=matrix)
         all_results: dict[str, dict] = {}
         elapsed_map: dict[str, float] = {}
         for sid in ordered_ids:
             t0 = time.perf_counter()
-            single = engine.run_all(
-                context,
-                params_map=params_map,
-                overrides_map=overrides_map,
-                strategy_ids=[sid],
-                parallel=False,
-            )
-            result = single[sid]
+            # 逐策略隔离: 单个策略崩溃 (如自定义代码的数据类型错误) 只记
+            # 错误跳过, 不让整批剩余策略陪葬 — 其余策略照常算完落缓存。
+            try:
+                single = engine.run_all(
+                    context,
+                    params_map=params_map,
+                    overrides_map=overrides_map,
+                    strategy_ids=[sid],
+                    parallel=False,
+                )
+                result = single[sid]
+            except Exception as e:
+                logger.warning("run_all: 策略 %s 执行失败, 跳过: %s", sid, e, exc_info=True)
+                handle.fail_one(sid, str(e))
+                continue
             payload = {
                 "total": result.total,
                 "as_of": str(as_of),
@@ -588,6 +609,7 @@ def _run_all_progressive(
         "as_of": str(as_of),
         "results": done_results,
         "pending": snap["pending"],
+        "errors": snap["errors"],
         "complete": snap["done"] and not snap["error"],
         "error": snap["error"],
         "started_at": snap["started_at_ms"],
