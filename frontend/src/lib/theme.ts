@@ -6,7 +6,7 @@
 //   - index.html 里有预渲染内联脚本, 首屏前就设好 class, 避免闪烁 (FOUC)
 //   - UI token (bg-surface/text-foreground 等) 自动跟随;
 //     图表画布不吃 CSS 变量, 统一走 useChartTheme() 取调色板
-import { createElement, Fragment, useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useState } from 'react'
 
 const KEY = 'tf-theme'
 const EVENT = 'tf-theme-change'
@@ -31,11 +31,6 @@ export function toggleTheme(): Theme {
   const next: Theme = getTheme() === 'dark' ? 'light' : 'dark'
   setTheme(next)
   return next
-}
-
-/** 兼容旧代码: 提供无操作 ThemeProvider (主题通过 localStorage + 事件驱动)。 */
-export function ThemeProvider({ children }: { children: ReactNode }) {
-  return createElement(Fragment, null, children)
 }
 
 /** 订阅当前主题 (本页切换 + 其他标签页切换均同步)。 */

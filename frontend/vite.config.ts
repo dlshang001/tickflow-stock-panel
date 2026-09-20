@@ -8,7 +8,7 @@ const backendPort = process.env.BACKEND_PORT || '3018'
 const backendTarget = `http://${proxyHost}:${backendPort}`
 
 export default defineConfig({
-  base: '/stock/', 
+  base: '/stock/',
   plugins: [react()],
   resolve: {
     alias: {

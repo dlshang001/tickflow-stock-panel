@@ -30,8 +30,15 @@ export const BUILTIN_COLUMNS: ColumnConfig[] = [
   { id: 'builtin:pct', source: { type: 'builtin', key: 'pct' }, label: '涨跌幅', visible: true, align: 'center' },
   { id: 'builtin:change_amount', source: { type: 'builtin', key: 'change_amount' }, label: '涨跌额', visible: false, align: 'center' },
   { id: 'builtin:amplitude', source: { type: 'builtin', key: 'amplitude' }, label: '振幅', visible: false, align: 'center' },
+  { id: 'builtin:open', source: { type: 'builtin', key: 'open' }, label: '今开', visible: false, align: 'center' },
+  { id: 'builtin:high', source: { type: 'builtin', key: 'high' }, label: '最高', visible: false, align: 'center' },
+  { id: 'builtin:low', source: { type: 'builtin', key: 'low' }, label: '最低', visible: false, align: 'center' },
+  { id: 'builtin:prev_close', source: { type: 'builtin', key: 'prev_close' }, label: '昨收', visible: false, align: 'center' },
+  { id: 'builtin:limit_up_price', source: { type: 'builtin', key: 'limit_up_price' }, label: '涨停价', visible: false, align: 'center' },
+  { id: 'builtin:limit_down_price', source: { type: 'builtin', key: 'limit_down_price' }, label: '跌停价', visible: false, align: 'center' },
   // 成交
   { id: 'builtin:turnover', source: { type: 'builtin', key: 'turnover' }, label: '换手率', visible: true, align: 'center' },
+  { id: 'builtin:volume', source: { type: 'builtin', key: 'volume' }, label: '成交量', visible: false, align: 'center' },
   { id: 'builtin:amount', source: { type: 'builtin', key: 'amount' }, label: '成交额', visible: false, align: 'center' },
   { id: 'builtin:float_val', source: { type: 'builtin', key: 'float_val' }, label: '流通值', visible: false, align: 'center' },
   { id: 'builtin:vol_ratio', source: { type: 'builtin', key: 'vol_ratio' }, label: '量比', visible: true, align: 'center' },
@@ -83,11 +90,15 @@ export const BUILTIN_COLUMNS: ColumnConfig[] = [
   { id: 'builtin:revenue_yoy', source: { type: 'builtin', key: 'revenue_yoy' }, label: '营收增速', visible: false, align: 'center' },
   { id: 'builtin:net_income_yoy', source: { type: 'builtin', key: 'net_income_yoy' }, label: '净利增速', visible: false, align: 'center' },
   { id: 'builtin:debt_ratio', source: { type: 'builtin', key: 'debt_ratio' }, label: '负债率', visible: false, align: 'center' },
+  // 自选加入信息 (后端读时计算, 不落盘; 默认隐藏)
+  { id: 'builtin:added_at', source: { type: 'builtin', key: 'added_at' }, label: '加入日期', visible: false, align: 'center' },
+  { id: 'builtin:pct_since_added', source: { type: 'builtin', key: 'pct_since_added' }, label: '加入以来', visible: false, align: 'center' },
 ]
 
 export const COLUMN_GROUPS: ColumnGroup[] = [
-  { id: 'price', label: '价格', icon: '💰', keys: ['price', 'pct', 'change_amount', 'amplitude'] },
-  { id: 'volume', label: '成交', icon: '📊', keys: ['turnover', 'amount', 'float_val', 'vol_ratio', 'annual_vol'] },
+  { id: 'price', label: '价格', icon: '💰', keys: ['price', 'pct', 'change_amount', 'amplitude', 'open', 'high', 'low', 'prev_close', 'limit_up_price', 'limit_down_price'] },
+  { id: 'added', label: '自选', icon: '⭐', keys: ['added_at', 'pct_since_added'] },
+  { id: 'volume', label: '成交', icon: '📊', keys: ['turnover', 'volume', 'amount', 'float_val', 'vol_ratio', 'annual_vol'] },
   { id: 'ma', label: '均线', icon: '📈', keys: ['ma5', 'ma10', 'ma20', 'ma60'] },
   { id: 'range', label: '区间', icon: '📏', keys: ['high_60d', 'low_60d'] },
   { id: 'tech', label: '技术指标', icon: '🔬', keys: ['rsi6', 'rsi14', 'rsi24', 'macd_dif', 'macd_dea', 'macd_hist', 'kdj_k', 'kdj_d', 'kdj_j', 'boll_upper', 'boll_lower', 'atr14', 'vol_ma5', 'vol_ma10'] },

@@ -47,14 +47,14 @@ import {
   BookOpenCheck,
   ChevronRight,
   ChevronDown,
-  PanelLeftClose,
-  PanelLeftOpen,
   Sun,
   Moon,
   X,
   WifiOff,
   Menu,
   PanelLeft,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from 'lucide-react'
 import { Logo } from './Logo'
 import { api, type CapabilityMatrix, type IndexQuote } from '@/lib/api'
@@ -1022,7 +1022,7 @@ export function Layout() {
             </NavLink>
           </div>
         </div>
-  </aside>
+      </aside>
 
       <motion.main
         initial={{ opacity: 0, y: 8 }}

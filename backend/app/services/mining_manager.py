@@ -235,7 +235,7 @@ class MiningJobManager:
                 self._finish_cancelled_locked(run_id)
                 return
             self._store.write_summary(run_id, result)
-            # 先落终态事件再翻转状态，保证读到终态状态时事件已存在
+            # 先记录终态事件再切换状态, 避免轮询方见到终态时事件尚未落盘
             self._store.append_event(run_id, status, {"status": status})
             self._store.transition_status(run_id, status)
 

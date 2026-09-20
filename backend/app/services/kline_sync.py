@@ -474,14 +474,8 @@ def _normalize_adj_factor(raw) -> pl.DataFrame:
         if src in df.columns and dst not in df.columns:
             rename_map[src] = dst
     df = df.rename(rename_map)
-    # 确保必要列存在,补齐缺失列
-    if "symbol" not in df.columns:
-        return pl.DataFrame()
-    if "trade_date" not in df.columns and "date" in df.columns:
-        df = df.rename({"date": "trade_date"})
     if "trade_date" in df.columns:
-        col_type = df.schema["trade_date"]
-        if col_type in {pl.Int64, pl.Int32, pl.UInt64, pl.UInt32, pl.Float64, pl.Float32}:
+        if df.schema["trade_date"] in {pl.Int64, pl.Int32, pl.UInt64, pl.UInt32, pl.Float64, pl.Float32}:
             # 毫秒时间戳 → 北京墙钟日期。不能直接 from_epoch().dt.date():
             # 那是 UTC 日期, 除权事件时间戳为北京零点 (= UTC 前一日 16:00),
             # 会整体早一天 (与 SDK True 路径 fromtimestamp(ts/1000, Asia/Shanghai) 不一致)。
@@ -490,24 +484,38 @@ def _normalize_adj_factor(raw) -> pl.DataFrame:
             )
         else:
             df = df.with_columns(pl.col("trade_date").cast(pl.Date, strict=False))
-    # 确保 ex_factor 列存在
-    if "ex_factor" not in df.columns and "adj_factor" in df.columns:
-        df = df.rename({"adj_factor": "ex_factor"})
     if "ex_factor" in df.columns:
         df = df.with_columns(pl.col("ex_factor").cast(pl.Float64, strict=False))
-    else:
-        # 缺少 ex_factor 列视为无效
+    cols = [c for c in ["symbol", "trade_date", "ex_factor"] if c in df.columns]
+    if len(cols) < 3:
         return pl.DataFrame()
-    # 强制统一 schema: symbol(str), trade_date(date), ex_factor(float64)
+    # 强制统一 schema: symbol(Utf8)/trade_date(Date)/ex_factor(Float64)。
+    # 旧存量 parquet 或第三方源可能带额外列、类型不一, 不在这里收口会导致后续
+    # concat(存量+新增) 因 schema 冲突报错。
     try:
-        result = df.select(
+        return df.select(
             pl.col("symbol").cast(pl.Utf8),
             pl.col("trade_date").cast(pl.Date, strict=False),
             pl.col("ex_factor").cast(pl.Float64, strict=False),
         ).drop_nulls()
     except Exception:
         return pl.DataFrame()
-    return result
+
+
+def _canonicalize_adj(df: "pl.DataFrame") -> "pl.DataFrame":
+    """统一除权因子帧 schema: symbol(Utf8)/trade_date(Date)/ex_factor(Float64)。
+
+    存量 parquet 或第三方源可能带额外列、类型不一, concat(存量+新增) 前需收口,
+    否则 polars 会因 schema 冲突报错。
+    """
+    if df.is_empty():
+        return df
+    exprs = [pl.col("symbol").cast(pl.Utf8)]
+    if "trade_date" in df.columns:
+        exprs.append(pl.col("trade_date").cast(pl.Date, strict=False))
+    if "ex_factor" in df.columns:
+        exprs.append(pl.col("ex_factor").cast(pl.Float64, strict=False))
+    return df.select(exprs)
 
 
 def sync_adj_factor(symbols: list[str], repo: KlineRepository,
@@ -542,8 +550,11 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
             factor_dir = "adj_factor_etf" if asset_type == "etf" else "adj_factor"
             out = repo.store.data_dir / factor_dir / "all.parquet"
             out.parent.mkdir(parents=True, exist_ok=True)
+            new_data = _canonicalize_adj(new_data)
+            if new_data.is_empty():
+                return 0, []
             if out.exists():
-                existing = pl.read_parquet(out)
+                existing = _canonicalize_adj(pl.read_parquet(out))
                 before = existing.height
                 merged = pl.concat([existing, new_data]).unique(
                     subset=["symbol", "trade_date"], keep="last",
@@ -601,24 +612,12 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
     if not all_dfs:
         return 0, []
 
-    # 强制统一全部 DataFrame 的 schema,避免 concat 因类型不一致而报错
-    def _canonicalize(df: pl.DataFrame) -> pl.DataFrame:
-        if df.is_empty():
-            return df
-        exprs: list = [pl.col("symbol").cast(pl.Utf8)]
-        if "trade_date" in df.columns:
-            exprs.append(pl.col("trade_date").cast(pl.Date, strict=False))
-        if "ex_factor" in df.columns:
-            exprs.append(pl.col("ex_factor").cast(pl.Float64, strict=False))
-        return df.select(exprs)
-
-    canonical_dfs = [_canonicalize(d) for d in all_dfs if not d.is_empty()]
+    canonical_dfs = [_canonicalize_adj(d) for d in all_dfs if not d.is_empty()]
     if not canonical_dfs:
         return 0, []
-
     new_data = pl.concat(canonical_dfs, how="diagonal_relaxed") if len(canonical_dfs) > 1 else canonical_dfs[0]
 
-    # 提取受影响的 symbol 列表
+    # 提取受影响的 symbol 列表(合并前)
     affected = new_data["symbol"].unique().to_list()
 
     factor_dir = "adj_factor_etf" if asset_type == "etf" else "adj_factor"
@@ -626,9 +625,7 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
     out.parent.mkdir(parents=True, exist_ok=True)
 
     if out.exists():
-        existing = pl.read_parquet(out)
-        # 统一列结构与类型：旧数据可能含 index/timestamp 等额外列，trade_date 也可能是 String 而非 Date
-        existing = _canonicalize(existing)
+        existing = _canonicalize_adj(pl.read_parquet(out))
         before = existing.height
         merged = pl.concat([existing, new_data]).unique(
             subset=["symbol", "trade_date"], keep="last",
@@ -1003,6 +1000,13 @@ def sync_minute_batch(
         return df
 
     tf = get_client()
+
+    # naive 窗口按北京墙钟解释 (同 _as_beijing): /api/kline/minute-batch 以 naive 北京墙钟
+    # 构造窗口, 直接交给 _datetime_to_ms 会按服务器本地时区换算, UTC 主机上整体晚 8 小时
+    if start_time is not None:
+        start_time = _as_beijing(start_time)
+    if end_time is not None:
+        end_time = _as_beijing(end_time)
 
     # TickFlow count 上限 10000 根/股, 1 天 240 根 → 单次最多约 41 个交易日。
     # 按 segment_trading_days 交易日分段 (交易日→自然日 ×7/5 换算, 含节假日余量)。
