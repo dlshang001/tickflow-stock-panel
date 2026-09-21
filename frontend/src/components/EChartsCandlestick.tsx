@@ -904,6 +904,10 @@ export function EChartsCandlestick({
   const infoIdxRef = useRef<number>(data.length - 1)
   const compactRef = useRef(false)
   const userZoomRef = useRef<{ start: number; end: number } | null>(null)
+  // dataZoom 监听只在图表创建时注册一次, 直接调用会一直执行「创建那次渲染」的 updateCompactPresentation:
+  // 它的 data/dateIndexMap/markers 停在旧标的, 会把上一只的买卖标记 merge 回新标的图上。
+  // 与 dataRef/getInfoBarHTMLRef 同法, 经 ref 取最新一次渲染的函数。
+  const updateCompactPresentationRef = useRef<() => void>(() => {})
   // 竖虚线(crosshair)是否可见: 控制信息栏「至今」字段的显隐。鼠标移出图表区即 false。
   const hoverActiveRef = useRef(false)
 
@@ -1060,19 +1064,25 @@ export function EChartsCandlestick({
     const chart = echarts.init(el, undefined, { renderer: 'canvas' })
     chartRef.current = chart
 
-    const updateHoverVisibility = (active: boolean) => {
-      if (active === hoverActiveRef.current) return
-      hoverActiveRef.current = active
+    // 信息栏内容由本组件直接写 innerHTML; 悬停显隐与悬停 K 线变化共用这一处写入口
+    const writeInfoBar = () => {
       const infoEl = infoBarRef.current
       if (!infoEl) return
       const html = getInfoBarHTMLRef.current()
-      if (html) infoEl.innerHTML = html
+      if (html) infoEl.innerHTML = html  // 只在有内容时更新
+    }
+
+    // 切换悬停态; 返回是否翻转, 翻转后由调用方重绘
+    const setHoverActive = (active: boolean) => {
+      if (active === hoverActiveRef.current) return false
+      hoverActiveRef.current = active
+      return true
     }
 
     // The outer chart surface stays under the pointer when the info bar wraps and
     // pushes the canvas down, so hover visibility cannot oscillate at that boundary.
-    const handlePointerEnter = () => updateHoverVisibility(true)
-    const handlePointerLeave = () => updateHoverVisibility(false)
+    const handlePointerEnter = () => { if (setHoverActive(true)) writeInfoBar() }
+    const handlePointerLeave = () => { if (setHoverActive(false)) writeInfoBar() }
     hoverEl.addEventListener('mouseenter', handlePointerEnter)
     hoverEl.addEventListener('mouseleave', handlePointerLeave)
 
@@ -1094,14 +1104,9 @@ export function EChartsCandlestick({
       if (foundIdx < 0) return
       const idxChanged = infoIdxRef.current !== foundIdx
       if (idxChanged) infoIdxRef.current = foundIdx
-      // 悬停 K 线变化 → 重绘一次信息栏; 显隐由外层图表区域 enter/leave 负责。
-      if (idxChanged) {
-        const infoEl = infoBarRef.current
-        if (infoEl) {
-          const html = getInfoBarHTMLRef.current()
-          if (html) infoEl.innerHTML = html  // 只在有内容时更新
-        }
-      }
+      // 竖虚线命中 K 线即悬停成立: 切股后竖虚线重画而鼠标没离开图表区, 等不到 mouseenter, 靠这里复显
+      const hoverResumed = setHoverActive(true)
+      if (idxChanged || hoverResumed) writeInfoBar()
       // 更新子图 graphic (仅悬停 K 线变化时; 纯显隐切换不影响副图)
       if (idxChanged) triggerInfoBarUpdate()
     })
@@ -1145,7 +1150,7 @@ export function EChartsCandlestick({
       const newCompact = visibleCount > COMPACT_THRESHOLD
       if (newCompact !== compactRef.current) {
         compactRef.current = newCompact
-        updateCompactPresentation()
+        updateCompactPresentationRef.current()
       }
     })
 
@@ -1232,6 +1237,7 @@ export function EChartsCandlestick({
     }
     if (seriesUpdates.length > 0) chart.setOption({ series: seriesUpdates })
   }
+  updateCompactPresentationRef.current = updateCompactPresentation
 
   // ===== 核心: 仅在数据/配置变更时全量 setOption =====
   useEffect(() => {
