@@ -45,10 +45,11 @@ async def test_registry_deny_wakes_waiter() -> None:
     assert await waiter == "denied"
 
 
-async def test_registry_timeout_denies_and_recycles() -> None:
+async def test_registry_timeout_expires_and_recycles() -> None:
     reg = assistant_actions.PendingRegistry(timeout_s=0.02)
     action = await reg.register(assistant_actions.new_call_id(), "run_backtest", {})
-    assert await reg.await_decision(action) == "denied"
+    # 超时是「没人作答」, 与用户点拒绝区分, 同样不执行
+    assert await reg.await_decision(action) == "expired"
     # 超时回收后, 迟到的决策端点调用应返回 None(404)
     assert await reg.resolve(action.call_id, True) is None
 
@@ -261,6 +262,39 @@ async def test_action_tool_error_contract_via_execute(tmp_path: Path) -> None:
     assert "无效的证券代码" in payload["error"]
 
 
+async def test_action_tool_timeout_is_not_reported_as_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """确认卡超时未作答: 不执行, 回填给模型的是「确认超时」而不是「用户已拒绝, 不要重复尝试」。"""
+    executed: list[str] = []
+    fed_back: list[dict[str, Any]] = []
+
+    async def fake_execute(name: str, args: dict[str, Any], ctx: Any) -> dict[str, Any]:
+        executed.append(name)
+        return {"ok": True, "result": {}}
+
+    real_summarize = assistant_tools.summarize_tool_result
+
+    def capture(name: str, result: dict[str, Any]) -> str:
+        fed_back.append(result)
+        return real_summarize(name, result)
+
+    async def no_answer(_event: dict[str, Any]) -> None:
+        return None
+
+    monkeypatch.setattr(assistant_actions.registry, "timeout_s", 0.05)
+    monkeypatch.setattr(assistant_tools, "summarize_tool_result", capture)
+    await _run_chat(
+        monkeypatch,
+        [{"id": "c1", "name": "run_backtest", "arguments": '{"strategy_id": "demo"}'}],
+        fake_execute,
+        no_answer,
+    )
+
+    assert executed == []
+    assert len(fed_back) == 1 and fed_back[0]["ok"] is False
+    assert "确认超时" in fed_back[0]["error"]
+    assert "拒绝" not in fed_back[0]["error"]
+
+
 # ── 摘要: 拒绝/超时的足迹卡一行文案 ──────────────────────────────
 
 def test_summarize_action_results() -> None:
@@ -317,6 +351,32 @@ def test_check_data_coverage_fresh_data_has_few_issues(tmp_path: Path) -> None:
 
     assert result["issues"] == []
     assert result["financials"]["metrics"]["latest_period"] == "2026-06-30"
+
+
+def test_biz_days_behind_counts_workdays_after_latest_up_to_today() -> None:
+    from datetime import date as date_cls
+
+    fri, sat, sun, mon = (date_cls(2026, 9, d) for d in (25, 26, 27, 28))
+    assert assistant_tools._biz_days_behind("2026-09-25", sat) == 0  # 周五数据, 周六不落后
+    assert assistant_tools._biz_days_behind("2026-09-25", sun) == 0
+    assert assistant_tools._biz_days_behind("2026-09-25", mon) == 1  # 周一的日K还没有
+    assert assistant_tools._biz_days_behind("2026-09-24", sat) == 1  # 缺周五
+    assert assistant_tools._biz_days_behind("2026-09-25", fri) == 0
+
+
+def test_check_data_coverage_weekend_with_friday_data_has_no_lag_issue(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from datetime import date as date_cls
+
+    monkeypatch.setattr(assistant_tools, "cn_today", lambda: date_cls(2026, 9, 26))  # 周六
+    for sub in ("kline_daily", "kline_daily_enriched", "kline_minute"):
+        _make_partitions(tmp_path, sub, ["2026-09-24", "2026-09-25"])  # 截至周五
+    ctx = assistant_tools.ToolContext.build(data_dir=tmp_path)
+
+    result = assistant_tools._check_data_coverage({}, ctx)
+
+    assert not any("日线停留在" in issue for issue in result["issues"])
 
 
 class _StubRepo:
