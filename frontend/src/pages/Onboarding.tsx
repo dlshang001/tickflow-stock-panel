@@ -74,7 +74,7 @@ export function Onboarding() {
   const finish = () => complete.mutate()
 
   return (
-    <div className="relative min-h-screen bg-base overflow-hidden flex flex-col">
+    <div className="relative min-h-full bg-base overflow-hidden flex flex-col">
       {/* 背景光晕 —— 品牌 + 主色渐变 */}
       <div className="pointer-events-none absolute inset-0 overflow-hidden">
         <div
@@ -649,6 +649,19 @@ function ResultStep({ onNext, onBack }: { onNext: () => void; onBack: () => void
         <div className="mt-5 flex items-center gap-2 text-xs text-muted">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
           正在检测能力路由…
+        </div>
+      ) : matrix.isError ? (
+        <div className="mt-5 flex flex-col items-center gap-2 rounded-card border border-danger/30 bg-danger/[0.04] p-5 text-center">
+          <span className="text-xs text-secondary">能力路由检测失败，请重试</span>
+          <button
+            type="button"
+            onClick={() => matrix.refetch()}
+            disabled={matrix.isFetching}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs text-accent transition-colors hover:bg-elevated disabled:opacity-50"
+          >
+            <Loader2 className={matrix.isFetching ? 'h-3 w-3 animate-spin' : 'h-3 w-3'} />
+            重试
+          </button>
         </div>
       ) : routes.length === 0 ? (
         <div className="mt-5 rounded-card border border-border bg-surface/80 p-5 text-center text-xs text-muted">

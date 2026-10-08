@@ -10,7 +10,7 @@
 
 构建 (在项目根目录):
   cd frontend && pnpm build                     # 先构建前端到 frontend/dist
-  pyinstaller packaging/tickflow.spec           # 产物在 dist/TickFlowStockPanel/
+  pyinstaller packaging/tsp.spec                # 产物在 dist/TSP/
 """
 import sys
 from importlib.util import find_spec
@@ -32,10 +32,10 @@ ROOT = Path(SPECPATH).parent
 FRONTEND_DIST = str(ROOT / "frontend" / "dist")
 TIERS_YAML = str(ROOT / "tiers.yaml")
 BUILTIN_STRATEGIES = str(ROOT / "backend" / "app" / "strategy" / "builtin")
-# 图标按平台选: Windows 用 .ico, macOS 用 .icns (PyInstaller 对 .ico 在
-# mac 上静默忽略, 不换格式 Dock/Finder 会显示通用图标)。两者都由
-# packaging/generate_icon.py 一并生成。
-APP_ICON = str(ROOT / "packaging" / ("icon.icns" if _IS_MACOS else "icon.ico"))
+# 图标按平台选: Windows 用 brand/icon.ico, macOS 用 brand/icon.icns —
+# 两者均由 brand/png/logo-tile-light-512.png 派生 (浅色圆角卡版, 品牌资产唯一来源,
+# 见 brand/README 接入指引), 无需 CI 现场生成。
+APP_ICON = str((ROOT / "brand" / "icon.icns") if _IS_MACOS else (ROOT / "brand" / "icon.ico"))
 
 # ── 收集带原生库的依赖 (.libs/ 目录必须完整, 否则启动崩) ─────────────
 # polars / pyarrow / duckdb / fastexcel 都自带共享库子目录
@@ -62,9 +62,28 @@ for pkg in ("_polars_runtime_32", "_polars_runtime_compat"):
 # Polars 新 ABI 运行时由加载器选择，需显式收集子模块。
 hiddenimports += collect_submodules("polars")
 
+# ── 内置可选插件 (app/plugins/*) ─────────────────────────────────────
+# loader._load_builtin_plugins() 在文件系统扫 <_internal>/app/plugins/*/plugin.yaml,
+# entry 又是 importlib 字符串动态导入 — 两条链路静态分析都看不见, 必须双声明:
+# datas 把清单 yaml 落盘 (frozen 下 plugins_dir() 恰好解析到 _internal/app/plugins),
+# hiddenimports 把 provider/client 塞进 PYZ。
+# 注: stocksdk 出于合规暂不进桌面包 (与 GHCR 镜像口径一致), 需要时仿照添加。
+datas += [
+    (str(ROOT / "backend" / "app" / "plugins" / "fuyao" / "plugin.yaml"), "app/plugins/fuyao"),
+]
+hiddenimports += [
+    "app.plugins.fuyao.provider",
+    "app.plugins.fuyao.client",
+]
+
 # ── pywebview 平台后端 (动态导入, PyInstaller 默认抓不到) ────────────
 hiddenimports += collect_submodules("webview")
 hiddenimports += collect_submodules("webview.platforms")
+# pywebview 运行时依赖链 (webview/__init__ 顶层 import proxy_tools, Windows 端
+# 还要 bottle/clr_loader/pythonnet)。显式声明为金丝雀: 构建环境缺这些包时
+# PyInstaller 直接报错, 而不是静默产出启动即崩的包 (曾因 venv 缺 proxy_tools
+# 发布过启动崩溃版本)。
+hiddenimports += ["proxy_tools", "bottle", "clr_loader", "pythonnet"]
 
 # ── 系统通知后端 (winotify/plyer 按平台动态导入) ─────────────────────
 if sys.platform == "win32":
@@ -113,6 +132,9 @@ for pkg in (
 datas += [(FRONTEND_DIST, "static")]
 # tiers.yaml → 包根 (config.py frozen 模式读 _MEIPASS/tiers.yaml)
 datas += [(TIERS_YAML, ".")]
+# frontend/package.json → 包根 (app/__init__.py frozen 模式读 _MEIPASS/package.json,
+# __version__ 与安装包 AppVersion / 页面显示同源, 版本号只改 package.json 一处)
+datas += [(str(ROOT / "frontend" / "package.json"), ".")]
 # 内置策略 → app/strategy/builtin/ (importlib 动态加载, 不能进 PYZ)
 datas += [(BUILTIN_STRATEGIES, "app/strategy/builtin")]
 
@@ -157,7 +179,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="TickFlowStockPanel",
+    name="TSP",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -179,7 +201,7 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="TickFlowStockPanel",
+    name="TSP",
 )
 
 # ── macOS: 封装成 .app 包 ────────────────────────────────────────────
@@ -200,13 +222,13 @@ if _IS_MACOS:
 
     app = BUNDLE(
         coll,
-        name="TickFlowStockPanel.app",
+        name="TSP.app",
         icon=APP_ICON,
         bundle_identifier="com.tickflow.stockpanel",
         version=APP_VERSION,   # → CFBundleShortVersionString / CFBundleVersion
         info_plist={
             "CFBundleName": "Tick Stock Panel",
-            "CFBundleDisplayName": "TickFlow 股票面板",
+            "CFBundleDisplayName": "TSP",
             "CFBundleVersion": APP_VERSION,
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "10.13",

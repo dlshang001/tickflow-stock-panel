@@ -1,6 +1,6 @@
 <div align="center">
 
-# 📈 TSP · A股智能量化工作台
+# <picture><source media="(prefers-color-scheme: dark)" srcset="brand/logo-dark-title.svg"><img src="brand/logo-title.svg" width="30" alt="TSP Logo"></picture> TSP · A股智能量化工作台
 
 <br/>
 
@@ -15,6 +15,8 @@
 [![GitHub stars](https://img.shields.io/github/stars/shy3130/tick-stock-panel?style=social)](https://github.com/shy3130/tick-stock-panel/stargazers)
 
 **自托管 · 零运维 · 核心能力全部开放成接口的 A 股量化工作台**
+
+[![官网](https://img.shields.io/badge/%E5%AE%98%E7%BD%91-tsp.shy313.com-8B5CF6?style=for-the-badge&labelColor=181717&logo=googlechrome&logoColor=white)](https://tsp.shy313.com/)
 
 `选股` · `回测` · `监控` · `因子挖掘` · `AI 助手` · `Open API` · `MCP`
 
@@ -406,6 +408,9 @@ flowchart TB
 
 面板的核心能力不只长在页面上 —— **全部开放成受控接口**,外部程序与 AI 客户端平等消费:
 
+> 🌐 **开放平台门户已上线 → [tsp.shy313.com](https://tsp.shy313.com/)**
+> 浏览 TSP 全部功能 · 注册账户 · 邀请好友 · 创建 API Key · 在线调用开放接口,一个入口直达。
+
 <table>
   <tr>
     <td width="50%" align="center"><b>设置 → 开放接口 · Token 管理</b><br/><sub>明文只显示一次,六档 scope 按需授予</sub></td>
@@ -492,6 +497,8 @@ docker run -d --name tsp -p 3018:3018 -v ${PWD}/data:/app/data ghcr.io/shy3130/t
 
 **打开 <http://localhost:3018> 即可使用** · 多架构镜像(linux/amd64 · arm64)由 CI 自动发布,本地无需 Python / Node
 
+**还没决定要不要部署?** 先逛逛 **[官网 tsp.shy313.com](https://tsp.shy313.com/)** —— 功能总览 · 账户注册 · API Key 管理
+
 </div>
 
 <br/>
@@ -502,6 +509,7 @@ docker run -d --name tsp -p 3018:3018 -v ${PWD}/data:/app/data ghcr.io/shy3130/t
 | **B · Compose 本地构建**              | 跑自己改过的代码 / 全套挂载 | Docker                                                                               |
 | **C · 本机 AI 代部署**                | 完全不想碰命令行            | 任一本机 AI 编程助手                                                                 |
 | **D · Dev 模式**                      | 二次开发                    | Python ≥ 3.11 · Node ≥ 20 · [uv](https://docs.astral.sh/uv/) · pnpm(`npm i -g pnpm`) |
+| **E · 桌面客户端**                    | 想要原生桌面窗口、免装环境  | Windows 10+ / macOS(Apple Silicon)                                                   |
 
 ### 方式 A:GHCR 现成镜像(免本地构建,多数用户推荐)
 
@@ -565,6 +573,24 @@ cp .env.example .env       # 按需填 TICKFLOW_API_KEY(留空 = None 模式)
 ```
 
 自动检查 / 下载依赖、释放端口、同时起前后端。后端 → <http://localhost:3018> · 前端 → <http://localhost:3011>。
+
+### 方式 E:桌面客户端(Windows / macOS)
+
+从 [Releases](https://github.com/shy3130/tick-stock-panel/releases/latest) 下载对应安装包:Windows 双击 `TSP-Setup-x64-*.exe` 按向导安装即可;macOS 下载 `TSP-macos-arm64-*.dmg`。
+
+<details>
+<summary><b>🍎 macOS 安装注意事项(点开查看)</b></summary>
+
+- **仅支持 Apple Silicon(M 系列芯片)**,暂无 Intel 版本。
+- 打开 dmg 后,请先把 **TSP.app 拖入「应用程序(Applications)」再运行**;不要直接在 dmg 挂载窗口里双击运行 —— 挂载卷是只读的,会导致启动即退出。
+- 首次打开会被 macOS Gatekeeper 拦截(安装包暂未做开发者签名与公证):前往 **系统设置 → 隐私与安全性**,下滑到「已阻止使用 "TSP"」→ 点 **仍要打开**,再按提示确认一次。
+- 若提示 **「"TSP" 已损坏,无法打开」**,或完成上一步后仍一闪退出:打开「终端」执行下面的命令,然后再启动(`xattr` 为 macOS 自带命令,作用是移除下载文件上的隔离标记,不会改动系统设置):
+
+```bash
+xattr -dr com.apple.quarantine /Applications/TSP.app
+```
+
+</details>
 
 ### 跑起来后的第一次使用
 

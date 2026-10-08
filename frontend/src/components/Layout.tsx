@@ -39,6 +39,7 @@ import {
   PanelLeft,
   PanelLeftClose,
   PanelLeftOpen,
+  Download,
 } from 'lucide-react'
 import {
   IconDashboard,
@@ -444,12 +445,12 @@ export function Layout() {
     [navWatchlist, navEnriched],
   )
 
-  // 数据同步状态轮询: 有活跃 job 时「数据」菜单项显示转圈
+  // 数据同步状态轮询: 有活跃 job 时「数据」菜单项显示转圈。
+  // 标签页隐藏时 TanStack 默认暂停轮询 — 转圈提示只在页面可见时有意义, 不再强制后台轮询
   const { data: pipelineJobs } = useQuery({
     queryKey: QK.pipelineJobs,
     queryFn: () => api.pipelineJobs(1),
     refetchInterval: (query) => (query.state.data?.active_id ? 2000 : 15000),
-    refetchIntervalInBackground: true,
   })
   const isDataSyncing = !!pipelineJobs?.active_id
 
@@ -539,11 +540,12 @@ export function Layout() {
         ? '关闭实时行情'
         : '开启实时行情'
 
-  // 轮询触发记录总数 → 更新监控中心徽标 (每 15 秒; 后台标签页由 SSE 事件驱动, 不轮询)
+  // 轮询触发记录总数 → 更新监控中心徽标 (每 15 秒; 后台标签页由 SSE 事件驱动, 不轮询)。
+  // 非交易时段无新告警, 降为 2 分钟兜底
   const alertsTotalQuery = useQuery({
     queryKey: ['alerts-total'],
     queryFn: () => api.alertsList({ days: 7, limit: 1 }),
-    refetchInterval: 15000,
+    refetchInterval: () => (isTrading ? 15000 : 120000),
     select: (data) => data.total,
   })
   // 只在拿到真实总数时同步徽标 (避免 data=undefined 时传 0 重置 lastSeen)
@@ -641,7 +643,7 @@ export function Layout() {
 
   return (
     <div
-      className="h-screen grid bg-base text-foreground overflow-hidden transition-[grid-template-columns] duration-200 ease-smooth"
+      className="h-full grid bg-base text-foreground overflow-hidden transition-[grid-template-columns] duration-200 ease-smooth"
       style={{ gridTemplateColumns: isDesktop && !overlayPreview ? (navState === 'expanded' ? '14rem 1fr' : navState === 'rail' ? '3.5rem 1fr' : '0 1fr') : '1fr' }}
     >
       {/* 移动端抽屉遮罩 */}
@@ -1022,30 +1024,30 @@ export function Layout() {
                     )}
                   />
                   <Settings className={cn('h-4 w-4 shrink-0 transition-colors', isActive ? 'text-accent' : 'text-foreground/60 group-hover:text-foreground/85')} />
-                  {!railMode && <span>设置</span>}
+                  {!railMode && <span className="whitespace-nowrap">设置</span>}
                   {!railMode && version && (
-                    <span className="ml-auto font-mono text-[10px] text-muted/50 select-none shrink-0">
+                    <span className="ml-auto flex items-center gap-1.5 font-mono text-[10px] text-muted/50 select-none shrink-0">
                       {version}
                       {hasUpdate && update.info && (
                         <span
                           role="button"
                           tabIndex={0}
-                          title={`发现新版本 ${update.info.latest}，点击前往检查更新`}
+                          title={`发现新版本 ${update.info.latest}，点击检查更新`}
                           onClick={(e) => {
                             e.preventDefault()
                             e.stopPropagation()
-                            navigate('/settings?tab=system')
+                            navigate('/settings?tab=system&autoupdate=1')
                           }}
                           onKeyDown={(e) => {
                             if (e.key === 'Enter' || e.key === ' ') {
                               e.preventDefault()
                               e.stopPropagation()
-                              navigate('/settings?tab=system')
+                              navigate('/settings?tab=system&autoupdate=1')
                             }
                           }}
-                          className="ml-1.5 inline-flex cursor-pointer items-center rounded-full bg-accent px-1.5 py-px text-[9px] font-semibold leading-none text-white transition-colors hover:bg-accent/90"
+                          className="inline-flex cursor-pointer text-amber-400 transition-transform hover:scale-110 animate-breath"
                         >
-                          NEW
+                          <Download className="h-3 w-3" />
                         </span>
                       )}
                     </span>

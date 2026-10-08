@@ -10,10 +10,13 @@ from __future__ import annotations
 import contextlib
 import logging
 import shutil
+import threading
 import time
 import uuid
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Any
 
 import polars as pl
 
@@ -27,6 +30,42 @@ from app.tickflow.rate_limits import chunked, resolve_limit, sleep_between_batch
 from app.tickflow.repository import KlineRepository, replace_with_retry
 
 logger = logging.getLogger(__name__)
+
+# ── SDK 批量调用守护 deadline ────────────────────────────────────────────
+# TickFlow SDK 自带 timeout=30s×3 重试, 但只保护其覆盖的请求阶段; 真挂死在
+# 不可中断的网络读里时调用永不返回 → 持有独占槽的重任务线程被连坐卡死,
+# 后续所有重任务无限排队(「分钟K同步卡死空转」的持有侧根因)。
+# 正常单批(限速+重试)远低于该值; 超时按分块失败处理, 心跳与协作取消照常推进。
+_SDK_CALL_DEADLINE_S = 600.0
+
+
+class SDKCallTimeoutError(TimeoutError):
+    """单次 SDK 批量调用超过守护 deadline 仍未返回(调用线程已放弃等待)。"""
+
+
+def _sdk_call_with_deadline(fn: Callable[[], Any], *, timeout_s: float = _SDK_CALL_DEADLINE_S) -> Any:
+    """在 daemon 线程执行一次 SDK 调用, join 超时即放弃并抛 SDKCallTimeoutError。
+
+    放弃后调用方按既有分块失败路径继续(记 warning / 标记本批失败), 协作式
+    取消在下一分块边界生效, 重任务槽得以释放。被放弃的线程为 daemon:
+    不阻塞进程退出, 迟到的结果被丢弃。
+    """
+    outcome: dict[str, Any] = {}
+
+    def _worker() -> None:
+        try:
+            outcome["result"] = fn()
+        except BaseException as e:  # noqa: BLE001 — 原样转交调用方
+            outcome["error"] = e
+
+    t = threading.Thread(target=_worker, daemon=True, name="sdk-call-deadline")
+    t.start()
+    t.join(timeout_s)
+    if t.is_alive():
+        raise SDKCallTimeoutError(f"SDK 调用超过 {timeout_s:.0f}s 未返回, 已放弃等待")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("result")
 
 
 def _atomic_write_parquet(df: pl.DataFrame, out) -> None:
@@ -184,16 +223,26 @@ def sync_daily_batch(symbols: list[str],
         sleep_between_batches(i, rpm)
         try:
             if start_time and end_time:
-                raw = tf.klines.batch(
+                raw = _sdk_call_with_deadline(lambda: tf.klines.batch(
                     chunk, period="1d", adjust="none",
                     start_time=_datetime_to_ms(start_time),
                     end_time=_datetime_to_ms(end_time),
                     count=10000,
                     as_dataframe=False, show_progress=False,
-                )
+                ))
             else:
-                raw = tf.klines.batch(chunk, period="1d", count=count or 250, adjust="none",
-                                      as_dataframe=False, show_progress=False)
+                raw = _sdk_call_with_deadline(lambda: tf.klines.batch(
+                    chunk, period="1d", count=count or 250, adjust="none",
+                    as_dataframe=False, show_progress=False))
+        except SDKCallTimeoutError as e:
+            logger.warning("batch fetch timed out for %d symbols (chunk %d/%d): %s",
+                           len(chunk), i + 1, len(chunks), e)
+            failed_syms.extend(chunk)
+            if on_chunk_done:
+                # 心跳: 分块失败也推进进度/取消检查点, 防持续超时的同步
+                # 长时间无上报(reap 误判)且协作取消无边界可退出。
+                on_chunk_done(i + 1, len(chunks))
+            continue
         except Exception as e:  # noqa: BLE001
             logger.warning("batch fetch failed for %d symbols (chunk %d/%d): %s",
                            len(chunk), i + 1, len(chunks), e)
@@ -448,6 +497,13 @@ def sync_daily_by_quotes(repo: KlineRepository) -> int:
     return daily_df.height
 
 
+# 除权事件明细列 (可选, 缺省为 null): 等差显示投影 (原始价 - Σ未来每股分红,
+# 分红按其后送转比例缩放) 与官方金额全精度因子链重建使用。
+# 存量 all.parquet 只有规范三列, 合并用 how="diagonal" 自动补 null;
+# 读取方 (_apply_adj_factor / minute_adjust) 只按规范三列消费, 不受影响。
+ADJ_DETAIL_COLS = ("dividend", "bonus", "allot", "allot_price", "prev_close")
+
+
 def _normalize_adj_factor(raw) -> pl.DataFrame:
     """Normalize SDK ex_factors response to symbol/trade_date/ex_factor."""
     if raw is None or len(raw) == 0:
@@ -486,36 +542,81 @@ def _normalize_adj_factor(raw) -> pl.DataFrame:
             df = df.with_columns(pl.col("trade_date").cast(pl.Date, strict=False))
     if "ex_factor" in df.columns:
         df = df.with_columns(pl.col("ex_factor").cast(pl.Float64, strict=False))
-    cols = [c for c in ["symbol", "trade_date", "ex_factor"] if c in df.columns]
-    if len(cols) < 3:
+    if not all(c in df.columns for c in ("symbol", "trade_date", "ex_factor")):
         return pl.DataFrame()
-    # 强制统一 schema: symbol(Utf8)/trade_date(Date)/ex_factor(Float64)。
-    # 旧存量 parquet 或第三方源可能带额外列、类型不一, 不在这里收口会导致后续
-    # concat(存量+新增) 因 schema 冲突报错。
+    # 明细列存在则透传 (缺省不影响规范三列); drop_nulls 只作用于规范三列 ——
+    # 明细列合法可为 null (如纯送转事件的 dividend)。
+    # 明细列存在则透传 (缺省不影响规范三列); drop_nulls 只作用于规范三列 ——
+    # 明细列合法可为 null (如纯送转事件的 dividend)。
+    df = df.with_columns([
+        pl.col(c).cast(pl.Float64, strict=False)
+        for c in ADJ_DETAIL_COLS if c in df.columns
+    ])
+    cols = ["symbol", "trade_date", "ex_factor"] + [
+        c for c in ADJ_DETAIL_COLS if c in df.columns
+    ]
+    return df.select(cols).drop_nulls(subset=["symbol", "trade_date", "ex_factor"])
+
+
+def _align_adj_factor_frame(df: pl.DataFrame) -> pl.DataFrame:
+    """除权因子帧对齐为统一 schema: 规范三列 + 明细列 (缺则补 null 列)。"""
+    df = df.with_columns(
+        pl.col("symbol").cast(pl.Utf8),
+        pl.col("trade_date").cast(pl.Date, strict=False),
+        pl.col("ex_factor").cast(pl.Float64, strict=False),
+        *[pl.col(c).cast(pl.Float64, strict=False)
+          for c in ADJ_DETAIL_COLS if c in df.columns],
+    )
+    df = df.with_columns([
+        pl.lit(None, dtype=pl.Float64).alias(c)
+        for c in ADJ_DETAIL_COLS if c not in df.columns
+    ])
+    return df.select(["symbol", "trade_date", "ex_factor", *ADJ_DETAIL_COLS])
+
+
+def _merge_adj_factor_store(out: Path, new_data: pl.DataFrame) -> tuple[int, list[str]]:
+    """合并写入 adj_factor 的 all.parquet, 返回 (新增行数, 因子发生变化的 symbol 列表)。
+
+    how="diagonal" 兼容存量三列 schema (旧行明细自动为 null);
+    unique keep="last" → 重复 (symbol, trade_date) 以本次同步为准,
+    重跑一次同步即完成存量数据的明细回填。
+
+    变化判定只看 ex_factor (新键 + 因子值差异 > 1e-9): 仅明细列回填
+    (dividend/prev_close 等补 null) 不改变复权价格 → 不计入变化列表,
+    enriched 局部重算因此不会被明细回填触发全市场重算。
+    """
+    out.parent.mkdir(parents=True, exist_ok=True)
+    new_data = _align_adj_factor_frame(new_data)
+    if not out.exists():
+        _atomic_write_parquet(new_data.sort(["symbol", "trade_date"]), out)
+        return new_data.height, sorted(new_data["symbol"].unique().to_list())
+    existing = pl.read_parquet(out)
+    # 本地定制: 存量 parquet 可能来自旧版本或第三方源, 规范三列先 cast 收口再
+    # diagonal 合并 (明细列原样保留), 避免类型不一致导致 concat schema 报错。
     try:
-        return df.select(
+        existing = existing.with_columns(
             pl.col("symbol").cast(pl.Utf8),
             pl.col("trade_date").cast(pl.Date, strict=False),
             pl.col("ex_factor").cast(pl.Float64, strict=False),
-        ).drop_nulls()
+        )
     except Exception:
-        return pl.DataFrame()
-
-
-def _canonicalize_adj(df: "pl.DataFrame") -> "pl.DataFrame":
-    """统一除权因子帧 schema: symbol(Utf8)/trade_date(Date)/ex_factor(Float64)。
-
-    存量 parquet 或第三方源可能带额外列、类型不一, concat(存量+新增) 前需收口,
-    否则 polars 会因 schema 冲突报错。
-    """
-    if df.is_empty():
-        return df
-    exprs = [pl.col("symbol").cast(pl.Utf8)]
-    if "trade_date" in df.columns:
-        exprs.append(pl.col("trade_date").cast(pl.Date, strict=False))
-    if "ex_factor" in df.columns:
-        exprs.append(pl.col("ex_factor").cast(pl.Float64, strict=False))
-    return df.select(exprs)
+        logger.warning("adj_factor 存量 parquet schema 收口失败, 按原始帧合并: %s", out)
+    before = existing.height
+    # ex_factor 变化判定 (明细回填不算): 与存量按 (symbol, trade_date) 对齐,
+    # 旧值缺失 (新事件) 或值差超容差即视为变化。
+    diffed = new_data.select(["symbol", "trade_date", "ex_factor"]).join(
+        existing.select(["symbol", "trade_date", "ex_factor"]),
+        on=["symbol", "trade_date"], how="left", suffix="_old",
+    ).filter(
+        pl.col("ex_factor_old").is_null()
+        | ((pl.col("ex_factor") - pl.col("ex_factor_old")).abs() > 1e-9)
+    )
+    changed_symbols = sorted(set(diffed["symbol"].to_list()))
+    merged = pl.concat([existing, new_data], how="diagonal").unique(
+        subset=["symbol", "trade_date"], keep="last",
+    ).sort(["symbol", "trade_date"])
+    _atomic_write_parquet(merged, out)
+    return merged.height - before, changed_symbols
 
 
 def sync_adj_factor(symbols: list[str], repo: KlineRepository,
@@ -528,6 +629,8 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
 
     支持增量: 传 start_time/end_time 只拉取该时间范围内的新除权事件。
     返回 (写入行数, 受影响的 symbol 列表) — 供 enriched 局部重算使用。
+    受影响 = 因子新增或值变化 (ex_factor diff) 的标的; 仅事件明细列
+    (dividend 等) 回填不改变复权价, 不计入受影响列表。
     """
     if not symbols:
         return 0, []
@@ -555,23 +658,11 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
                 else:
                     return 0, []
             else:
-                affected = new_data["symbol"].unique().to_list()
                 factor_dir = "adj_factor_etf" if asset_type == "etf" else "adj_factor"
-                out = repo.store.data_dir / factor_dir / "all.parquet"
-                out.parent.mkdir(parents=True, exist_ok=True)
-                new_data = _canonicalize_adj(new_data)
-                if new_data.is_empty():
-                    return 0, []
-                if out.exists():
-                    existing = _canonicalize_adj(pl.read_parquet(out))
-                    before = existing.height
-                    merged = pl.concat([existing, new_data]).unique(
-                        subset=["symbol", "trade_date"], keep="last",
-                    ).sort(["symbol", "trade_date"])
-                    _atomic_write_parquet(merged, out)
-                    return merged.height - before, affected
-                _atomic_write_parquet(new_data.sort(["symbol", "trade_date"]), out)
-                return new_data.height, affected
+                added, affected = _merge_adj_factor_store(
+                    repo.store.data_dir / factor_dir / "all.parquet", new_data
+                )
+                return added, affected
         # 自定义源未配置 adj_factor → 回退 TickFlow
 
     if not capset.has(Cap.ADJ_FACTOR):
@@ -600,11 +691,15 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
     for i, chunk in enumerate(chunks):
         sleep_between_batches(i, limit.rpm)
         try:
-            raw = tf.klines.ex_factors(chunk, **sdk_kwargs)
+            raw = _sdk_call_with_deadline(lambda: tf.klines.ex_factors(chunk, **sdk_kwargs))
             normalized = _normalize_adj_factor(raw)
             if not normalized.is_empty():
                 all_dfs.append(normalized)
             logger.debug("adj_factor chunk %d/%d: %d symbols", i + 1, len(chunks), len(chunk))
+        except SDKCallTimeoutError as e:
+            # on_chunk_done 在 try 外, 成败都会走到 → 心跳/取消检查点不缺
+            logger.warning("adj_factor chunk %d/%d timed out: %s", i + 1, len(chunks), e)
+            failed_syms.extend(chunk)
         except Exception as e:  # noqa: BLE001
             logger.warning("adj_factor chunk %d/%d failed: %s", i + 1, len(chunks), e)
             failed_syms.extend(chunk)
@@ -621,33 +716,13 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
     if not all_dfs:
         return 0, []
 
-    canonical_dfs = [_canonicalize_adj(d) for d in all_dfs if not d.is_empty()]
-    if not canonical_dfs:
-        return 0, []
-    new_data = pl.concat(canonical_dfs, how="diagonal_relaxed") if len(canonical_dfs) > 1 else canonical_dfs[0]
-
-    # 提取受影响的 symbol 列表(合并前)
-    affected = new_data["symbol"].unique().to_list()
+    new_data = pl.concat(all_dfs, how="diagonal_relaxed") if len(all_dfs) > 1 else all_dfs[0]
 
     factor_dir = "adj_factor_etf" if asset_type == "etf" else "adj_factor"
-    out = repo.store.data_dir / factor_dir / "all.parquet"
-    out.parent.mkdir(parents=True, exist_ok=True)
-
-    if out.exists():
-        existing = _canonicalize_adj(pl.read_parquet(out))
-        before = existing.height
-        merged = pl.concat([existing, new_data]).unique(
-            subset=["symbol", "trade_date"], keep="last",
-        ).sort(["symbol", "trade_date"])
-        _atomic_write_parquet(merged, out)
-        added = merged.height - before
-        logger.info("adj_factor merged: %d total (+%d new), %d/%d symbols",
-                     merged.height, added, new_data.height, len(symbols))
-        return added, affected
-    else:
-        _atomic_write_parquet(new_data.sort(["symbol", "trade_date"]), out)
-        logger.info("adj_factor synced: %d rows (%d symbols)", new_data.height, len(symbols))
-        return new_data.height, affected
+    added, affected = _merge_adj_factor_store(repo.store.data_dir / factor_dir / "all.parquet", new_data)
+    logger.info("adj_factor merged: +%d new rows, %d changed symbols, %d fetched / %d symbols",
+                added, len(affected), new_data.height, len(symbols))
+    return added, affected
 
 
 # ===== 分钟 K 同步 =====
@@ -1052,18 +1127,26 @@ def sync_minute_batch(
             step += 1
             try:
                 if cur_start and cur_end:
-                    raw = tf.klines.batch(
+                    raw = _sdk_call_with_deadline(lambda: tf.klines.batch(
                         chunk, period="1m",
                         start_time=_datetime_to_ms(cur_start),
                         end_time=_datetime_to_ms(cur_end),
                         count=10000,
                         adjust="none" if raw_basis else "forward",
                         as_dataframe=False, show_progress=False,
-                    )
+                    ))
                 else:
-                    raw = tf.klines.batch(chunk, period="1m", count=count or 1200,
-                                          adjust="none" if raw_basis else "forward",
-                                          as_dataframe=False, show_progress=False)
+                    raw = _sdk_call_with_deadline(lambda: tf.klines.batch(
+                        chunk, period="1m", count=count or 1200,
+                        adjust="none" if raw_basis else "forward",
+                        as_dataframe=False, show_progress=False))
+            except SDKCallTimeoutError as e:
+                logger.warning("minute batch fetch timed out for %d symbols: %s", len(chunk), e)
+                if on_chunk_done:
+                    # 心跳: 持续超时时保留进度上报与取消检查点(分钟路径的成功
+                    # 分支才回调, 这里补齐失败分支), 防僵尸线程滞留独占槽。
+                    on_chunk_done(step, total_steps, seg_label)
+                continue
             except Exception as e:  # noqa: BLE001
                 logger.warning("minute batch fetch failed for %d symbols: %s", len(chunk), e)
                 continue
