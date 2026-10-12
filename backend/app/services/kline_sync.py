@@ -559,6 +559,7 @@ def _normalize_adj_factor(raw) -> pl.DataFrame:
 def _align_adj_factor_frame(df: pl.DataFrame) -> pl.DataFrame:
     """除权因子帧对齐为统一 schema: 规范三列 + 明细列 (缺则补 null 列)。"""
     df = df.with_columns(
+        pl.col("symbol").cast(pl.Utf8),
         pl.col("trade_date").cast(pl.Date, strict=False),
         pl.col("ex_factor").cast(pl.Float64, strict=False),
         *[pl.col(c).cast(pl.Float64, strict=False)
@@ -588,6 +589,16 @@ def _merge_adj_factor_store(out: Path, new_data: pl.DataFrame) -> tuple[int, lis
         _atomic_write_parquet(new_data.sort(["symbol", "trade_date"]), out)
         return new_data.height, sorted(new_data["symbol"].unique().to_list())
     existing = pl.read_parquet(out)
+    # 本地定制: 存量 parquet 可能来自旧版本或第三方源, 规范三列先 cast 收口再
+    # diagonal 合并 (明细列原样保留), 避免类型不一致导致 concat schema 报错。
+    try:
+        existing = existing.with_columns(
+            pl.col("symbol").cast(pl.Utf8),
+            pl.col("trade_date").cast(pl.Date, strict=False),
+            pl.col("ex_factor").cast(pl.Float64, strict=False),
+        )
+    except Exception:
+        logger.warning("adj_factor 存量 parquet schema 收口失败, 按原始帧合并: %s", out)
     before = existing.height
     # ex_factor 变化判定 (明细回填不算): 与存量按 (symbol, trade_date) 对齐,
     # 旧值缺失 (新事件) 或值差超容差即视为变化。
@@ -811,7 +822,7 @@ def _normalize_minute(df_in, default_symbol: str | None = None) -> pl.DataFrame:
     # datetime 列:优先用 timestamp(毫秒精度),其次 trade_time
     if "timestamp" in df.columns:
         # TickFlow 毫秒时间戳为 UTC 基准; 契约要求北京墙钟 naive
-        # (统一归一口径, 见 CONTRIBUTING §3.3)
+        # (与 stock-sdk provider 归一口径一致, 见 CONTRIBUTING §3.3)
         df = df.with_columns(
             pl.from_epoch(pl.col("timestamp").cast(pl.Int64), time_unit="ms")
             .dt.replace_time_zone("UTC")

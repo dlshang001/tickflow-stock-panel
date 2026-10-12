@@ -113,6 +113,10 @@ function OnboardingGuard({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
+// basename 与 vite.config.ts 的 base 保持一致(由 Vite 注入 BASE_URL),
+// 使应用可部署在子路径(如 /stock/)下。去掉尾部斜杠以符合 react-router 要求。
+const BASENAME = import.meta.env.BASE_URL.replace(/\/$/, '')
+
 // 按需路由的加载占位 (与 OnboardingGuard 的加载态同风格)
 function RouteFallback() {
   return (
@@ -191,4 +195,4 @@ export const router = createBrowserRouter([
       }),
     ],
   },
-])
+], { basename: BASENAME })
