@@ -237,6 +237,7 @@ export interface AiStockReport {
   symbol: string
   name: string
   focus: string
+  model?: string | null
   content: string
   summary?: string
   close?: number | null
@@ -1866,6 +1867,22 @@ export interface SponsorModelItem {
   output_price?: number | null
 }
 
+export interface CodexModelItem {
+  model: string
+  display_name: string
+  description: string
+  supported_reasoning_efforts: { reasoning_effort: string; description: string }[]
+  default_reasoning_effort: string
+  is_default: boolean
+}
+
+export interface CodexModelCatalog {
+  models: CodexModelItem[]
+  fetched_at: string | null
+  stale: boolean
+  error: string | null
+}
+
 export interface SettingsState {
   mode: 'none' | 'free' | 'api_key'
   tickflow_api_key_masked: string
@@ -2308,6 +2325,10 @@ export const api = {
   /** 赞助商(RunningHub)模型列表(后端代理, 规避其网关按 Origin 过滤) */
   sponsorModels: () =>
     request<{ models: string[]; items?: SponsorModelItem[] }>('/api/settings/ai/sponsor-models'),
+
+  codexModels: (forceRefresh = false) =>
+    request<CodexModelCatalog>(`/api/settings/ai/codex-models${forceRefresh ? '?force_refresh=true' : ''}`),
+  aiModels: () => request<{ models: string[] }>('/api/settings/ai/models'),
 
   // ===== API Token 管理 (开放层; 仅 UI 会话可达) =====
   apiTokensList: () =>
@@ -3643,7 +3664,7 @@ export const api = {
     request<{ reports: AiStockReport[] }>('/api/stock-analysis/reports'),
 
   stockAnalysisReportSave: (r: {
-    symbol: string; name?: string; focus?: string; content: string
+    symbol: string; name?: string; focus?: string; model?: string | null; content: string
     summary?: string; close?: number | null
     levels?: Record<LevelType, PriceLevel[]>
   }) =>
@@ -3658,19 +3679,20 @@ export const api = {
    * AI 个股四维分析 — 流式调用(NDJSON,与财务分析同协议)。
    * meta 里额外带 levels(关键价位)供图表回放。
    */
-  async *stockAnalyzeStream(symbol: string, focus?: string): AsyncGenerator<{
+  async *stockAnalyzeStream(symbol: string, focus?: string, model?: string): AsyncGenerator<{
     type: 'meta' | 'delta' | 'error' | 'done' | 'ping'
     symbol?: string
     summary?: string
     levels?: Record<LevelType, PriceLevel[]>
     close?: number | null
+    model?: string | null
     content?: string
     message?: string
   }> {
     const res = await fetch('/api/stock-analysis/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol, focus: focus ?? '' }),
+      body: JSON.stringify({ symbol, focus: focus ?? '', model: model || undefined }),
     })
     if (!res.ok) {
       let detail = ''

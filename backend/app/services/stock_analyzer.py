@@ -320,6 +320,7 @@ async def analyze_stock_stream(
     data_dir: Path,
     symbol: str,
     focus: str = "",
+    model: str | None = None,
 ) -> AsyncIterator[str]:
     """流式个股分析:yield 出每个 NDJSON 事件。
 
@@ -346,6 +347,22 @@ async def analyze_stock_stream(
     asset_type = repo.resolve_asset_type(symbol)
     fins = {} if asset_type in {"etf", "index"} else _load_financials(data_dir, symbol)
 
+    from app.services.ai_provider import (
+        current_ai_model,
+        current_codex_effective_model,
+        is_codex_cli_provider,
+    )
+
+    configured_model = (
+        current_codex_effective_model()
+        if is_codex_cli_provider()
+        else current_ai_model()
+    )
+    selected_model = (model or "").strip() or configured_model.strip()
+    if len(selected_model) > 200 or any(ord(char) < 32 for char in selected_model):
+        yield json.dumps({"type": "error", "message": "模型 ID 格式无效"}, ensure_ascii=False)
+        return
+
     # 4. meta
     yield json.dumps({
         "type": "meta",
@@ -353,6 +370,7 @@ async def analyze_stock_stream(
         "summary": summarize_levels(levels, close),
         "levels": levels,
         "close": close,
+        "model": selected_model or None,
     }, ensure_ascii=False)
 
     # 5+6. 构建提示词 + 流式调用 LLM(整体 try-except,任何异常都 yield error,避免前端卡死)
@@ -388,6 +406,7 @@ async def analyze_stock_stream(
             # 预算, 固定上限会把正文挤光(实测 4500 全被推理吃掉 → 正文 0 字)。
             max_tokens=None,
             prefer_final_answer=True,
+            model=selected_model or None,
         ):
             got_content = True
             yield json.dumps({"type": "delta", "content": delta}, ensure_ascii=False)

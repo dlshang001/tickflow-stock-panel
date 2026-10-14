@@ -6,7 +6,13 @@ import {
   Terminal, ChevronDown, Sparkles, Atom, Waves, Cloud, Gem, Moon,
 } from 'lucide-react'
 import { useSettings } from '@/lib/useSharedQueries'
-import { api, type SettingsState, type SponsorModelItem } from '@/lib/api'
+import { loadModels, selectModel } from '@/lib/aiModelStore'
+import { api, type CodexModelCatalog, type SettingsState, type SponsorModelItem } from '@/lib/api'
+import {
+  buildCodexModelOptions,
+  codexCatalogStatus,
+  FOLLOW_CODEX_DEFAULT_OPTION,
+} from '@/lib/codexModels'
 import { QK } from '@/lib/queryKeys'
 import { AnchorWrap } from '@/lib/useCardFlash'
 import { copyText } from '@/lib/clipboard'
@@ -49,32 +55,12 @@ const CODEX_PROVIDER = 'codex_cli'
 const OPENAI_PROVIDER = 'openai'
 const OPENAI_COMPAT_PROVIDER = 'openai_compat'
 const CODEX_COMMAND = 'codex'
-const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol'
-const DEFAULT_CODEX_REASONING_EFFORT = 'xhigh'
 const DEFAULT_OPENAI_MODEL = 'gpt-5.5'
 const DEFAULT_REASONING_EFFORT = 'high'
-const SAVED_CODEX_OPTION_VALUE = '__saved_codex_config__'
-const CODEX_REASONING_LABELS: Record<string, string> = {
-  high: '高',
-  xhigh: '极高',
-}
-
-type CodexModelOption = { label: string; value: string; model: string; effort: string; hint: string }
-
-const CODEX_MODEL_OPTIONS: CodexModelOption[] = [
-  { label: 'GPT-5.6 Sol · 极高（推荐）', value: 'gpt-5.6-sol:xhigh', model: 'gpt-5.6-sol', effort: 'xhigh', hint: '旗舰档，适合复杂金融分析与专业任务' },
-  { label: 'GPT-5.6 Terra · 极高', value: 'gpt-5.6-terra:xhigh', model: 'gpt-5.6-terra', effort: 'xhigh', hint: '平衡智能、速度与使用成本' },
-  { label: 'GPT-5.6 Luna · 极高', value: 'gpt-5.6-luna:xhigh', model: 'gpt-5.6-luna', effort: 'xhigh', hint: '适合成本敏感与高频分析任务' },
-  { label: 'gpt-5.5 · 高', value: 'gpt-5.5:high', model: 'gpt-5.5', effort: 'high', hint: '使用 gpt-5.5 + high 推理档' },
-  { label: 'gpt-5.5 · 极高', value: 'gpt-5.5:xhigh', model: 'gpt-5.5', effort: 'xhigh', hint: '使用 gpt-5.5 + xhigh 推理档' },
-  { label: '跟随本机 Codex 默认', value: '', model: '', effort: '', hint: '使用本机 Codex CLI 配置的默认模型与推理强度' },
-]
 
 const codexModelLabel = (model?: string, effort?: string) => {
   if (!model && !effort) return '默认模型'
-  const modelLabel = model || '默认模型'
-  const effortLabel = effort ? CODEX_REASONING_LABELS[effort] ?? effort : ''
-  return effortLabel ? `${modelLabel} · ${effortLabel}` : modelLabel
+  return effort ? `${model || '默认模型'} · ${effort}` : model || '默认模型'
 }
 
 type AiPreset = {
@@ -110,7 +96,7 @@ const PRESETS: AiPreset[] = [
   { label: '通义千问', url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-3.6plus', website: 'https://tongyi.aliyun.com/', websiteLabel: 'tongyi.aliyun.com', description: '阿里云 DashScope 兼容模式接口。', icon: Cloud },
   { label: '智谱 GLM', url: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-5.2', website: 'https://open.bigmodel.cn/', websiteLabel: 'open.bigmodel.cn', description: '智谱 AI 官方 OpenAI 兼容接口。', icon: Gem },
   { label: 'Kimi', url: 'https://api.moonshot.cn/v1', model: 'kimi-k2.7-code', website: 'https://platform.moonshot.cn/', websiteLabel: 'platform.moonshot.cn', description: '月之暗面 Moonshot 官方 OpenAI 兼容接口，支持超长上下文。', icon: Moon },
-  { label: 'Codex CLI', provider: CODEX_PROVIDER, url: '', model: DEFAULT_CODEX_MODEL, codexCommand: CODEX_COMMAND, website: 'https://developers.openai.com/codex/noninteractive', websiteLabel: 'codex exec', description: '调用本机 Codex CLI 的 codex exec, 适合已登录 ChatGPT/Codex 的本地环境。', icon: Terminal },
+  { label: 'Codex CLI', provider: CODEX_PROVIDER, url: '', model: '', codexCommand: CODEX_COMMAND, website: 'https://developers.openai.com/codex/noninteractive', websiteLabel: 'codex exec', description: '调用本机 Codex CLI 的 codex exec, 适合已登录 ChatGPT/Codex 的本地环境。', icon: Terminal },
 ]
 
 const findPreset = (provider: string, baseUrl: string, codexCommand: string) => PRESETS.find(p => {
@@ -132,6 +118,8 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
   const [reasoningEffort, setReasoningEffort] = useState(DEFAULT_REASONING_EFFORT)
   const [codexModel, setCodexModel] = useState('')
   const [codexReasoningEffort, setCodexReasoningEffort] = useState('')
+  const [codexCatalog, setCodexCatalog] = useState<CodexModelCatalog | null>(null)
+  const [codexCatalogLoading, setCodexCatalogLoading] = useState(false)
   const [codexCommand, setCodexCommand] = useState(CODEX_COMMAND)
   const [customUa, setCustomUa] = useState(false)
   const [userAgent, setUserAgent] = useState('')
@@ -171,25 +159,10 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
   const selectedPreset = PRESETS.find(p => p.label === selectedPresetLabel) ?? PRESETS[0]
   const savedCodexModel = s?.ai_codex_model ?? (savedCodexProvider ? (s?.ai_model ?? '') : '')
   const savedCodexEffort = s?.ai_codex_reasoning_effort ?? ''
-  const savedCodexOptionKnown = CODEX_MODEL_OPTIONS.some(option =>
-    option.model === savedCodexModel && option.effort === savedCodexEffort,
-  )
-  const savedCodexOption: CodexModelOption | null =
-    (savedCodexModel || savedCodexEffort) && !savedCodexOptionKnown
-      ? {
-          label: `${codexModelLabel(savedCodexModel, savedCodexEffort)}（当前配置）`,
-          value: SAVED_CODEX_OPTION_VALUE,
-          model: savedCodexModel,
-          effort: savedCodexEffort,
-          hint: '保留项目中已保存的模型与推理档；此兼容项不可编辑',
-        }
-      : null
-  const codexModelOptions = savedCodexOption
-    ? [savedCodexOption, ...CODEX_MODEL_OPTIONS]
-    : CODEX_MODEL_OPTIONS
+  const codexModelOptions = buildCodexModelOptions(codexCatalog, savedCodexModel, savedCodexEffort)
   const selectedCodexModelOption = codexModelOptions.find(option =>
     option.model === codexModel && option.effort === codexReasoningEffort,
-  ) ?? CODEX_MODEL_OPTIONS[0]
+  ) ?? FOLLOW_CODEX_DEFAULT_OPTION
   const codexModelSelectValue = selectedCodexModelOption.value
   const canSave = isCodexProvider ? true : !!baseUrl.trim() && !!model.trim()
   // 测试按钮可用性: codex 恒可(探测 CLI 可用性); 其余需要地址+模型, 且
@@ -238,6 +211,41 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
     if (userEditedRef.current) return
     syncFormFromSettings(s)
   }, [s])
+
+  useEffect(() => {
+    if (!isCodexProvider) return
+    let active = true
+    setCodexCatalogLoading(true)
+    api.codexModels().then(data => {
+      if (active) setCodexCatalog(data)
+    }).catch(error => {
+      if (active) setCodexCatalog(current => ({
+        models: current?.models ?? [],
+        fetched_at: current?.fetched_at ?? null,
+        stale: !!current?.fetched_at,
+        error: error instanceof Error ? error.message : 'Codex 模型目录读取失败',
+      }))
+    }).finally(() => {
+      if (active) setCodexCatalogLoading(false)
+    })
+    return () => { active = false }
+  }, [isCodexProvider])
+
+  const refreshCodexModels = async () => {
+    setCodexCatalogLoading(true)
+    try {
+      setCodexCatalog(await api.codexModels(true))
+    } catch (error) {
+      setCodexCatalog(current => ({
+        models: current?.models ?? [],
+        fetched_at: current?.fetched_at ?? null,
+        stale: !!current?.fetched_at,
+        error: error instanceof Error ? error.message : 'Codex 模型目录读取失败',
+      }))
+    } finally {
+      setCodexCatalogLoading(false)
+    }
+  }
 
   // 「从文件重新加载」: 用户外部编辑 secrets.json 后, 显式重读磁盘并覆盖表单。
   // 后端按 mtime 签名缓存失效, refetch 即取到最新文件内容, 无需重启服务。
@@ -304,6 +312,8 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
         } : {}),
       } : prev)
       qc.invalidateQueries({ queryKey: QK.settings })
+      if (s?.ai_provider && s.ai_provider !== provider) selectModel('')
+      void loadModels(true)
       setTimeout(() => setSaved(false), 2000)
     },
   })
@@ -312,6 +322,8 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
     mutationFn: () => api.clearAiSettings(),
     onSuccess: () => {
       setConfirmClear(false)
+      selectModel('')
+      void loadModels(true)
       userEditedRef.current = false
       setProvider(OPENAI_COMPAT_PROVIDER)
       setSelectedPresetLabel(PRESETS[0].label)
@@ -374,8 +386,8 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
     }
     if (p.provider === CODEX_PROVIDER) {
       setProvider(CODEX_PROVIDER)
-      setCodexModel(p.model)
-      setCodexReasoningEffort(DEFAULT_CODEX_REASONING_EFFORT)
+      setCodexModel('')
+      setCodexReasoningEffort('')
       setCodexCommand(CODEX_COMMAND)
       return
     }
@@ -606,13 +618,13 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
               </Field>
               <Field
                 label="模型 / 推理档"
-                hint={selectedCodexModelOption.hint}
+                hint={`${selectedCodexModelOption.hint} · 目录不等于账号权限，实际可用性以分析调用结果为准`}
               >
                 <select
                   value={codexModelSelectValue}
                   onChange={e => {
                     const value = e.target.value
-                    const option = codexModelOptions.find(item => item.value === value) ?? CODEX_MODEL_OPTIONS[0]
+                    const option = codexModelOptions.find(item => item.value === value) ?? FOLLOW_CODEX_DEFAULT_OPTION
                     setCodexModel(option.model)
                     setCodexReasoningEffort(option.effort)
                   }}
@@ -622,6 +634,15 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
                     <option key={option.value || 'codex-local-default'} value={option.value}>{option.label}</option>
                   ))}
                 </select>
+                <div className="flex items-center gap-2 text-[10px] text-muted">
+                  <span className="min-w-0 flex-1 truncate" title={codexCatalog?.error ?? undefined}>
+                      {codexCatalogStatus(codexCatalog, codexCatalogLoading)}
+                  </span>
+                  <button type="button" onClick={refreshCodexModels} disabled={codexCatalogLoading}
+                    className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-1 text-muted transition-colors hover:text-accent disabled:opacity-50">
+                    <RefreshCw className={`h-3 w-3 ${codexCatalogLoading ? 'animate-spin' : ''}`} />刷新
+                  </button>
+                </div>
               </Field>
             </div>
           ) : (

@@ -450,6 +450,43 @@ def clear_ai_settings() -> dict:
     return {"ok": True}
 
 
+@router.get("/ai/codex-models")
+async def list_codex_models(force_refresh: bool = False) -> dict:
+    """Fetch the local Codex CLI model catalog (cached, refreshable, non-persistent)."""
+    from app.services.ai_provider import codex_model_catalog
+
+    return await codex_model_catalog(force_refresh=force_refresh)
+
+
+@router.get("/ai/models")
+async def get_ai_models() -> dict:
+    """Return model IDs for model selectors, preserving the existing response shape."""
+    from app.services.ai_provider import (
+        CODEX_CLI_PROVIDER,
+        codex_model_catalog,
+        current_ai_model,
+        current_ai_provider,
+        current_codex_effective_model,
+    )
+
+    codex_provider = current_ai_provider() == CODEX_CLI_PROVIDER
+    current = (current_codex_effective_model() if codex_provider else current_ai_model()).strip()
+    if codex_provider:
+        catalog = await codex_model_catalog()
+        models = [entry["model"] for entry in catalog["models"]]
+        default_entry = next(
+            (entry["model"] for entry in catalog["models"] if entry.get("is_default")),
+            "",
+        )
+    else:
+        models = [current] if current else []
+        default_entry = ""
+    preferred = current or default_entry
+    if preferred:
+        models = [preferred, *(model for model in models if model != preferred)]
+    return {"models": models}
+
+
 @router.get("/ai/sponsor-models")
 async def list_sponsor_models() -> dict:
     """代理获取赞助商(RunningHub)的模型列表。

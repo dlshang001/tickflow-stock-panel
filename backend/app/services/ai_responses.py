@@ -319,10 +319,11 @@ async def stream_text(
     temperature: float | None,
     max_tokens: int | None,
     timeout: float,
+    model: str | None = None,
 ) -> AsyncIterator[str]:
     client = responses_client(timeout)
     payload = responses_kwargs(temperature=temperature, max_tokens=max_tokens)
-    payload["model"] = ai_provider.current_ai_model()
+    payload["model"] = (model or "").strip() or ai_provider.current_ai_model()
     payload["input"] = chat_input(messages)
     stream = await _create_with_retry(client, payload=payload, stream=True)
     try:

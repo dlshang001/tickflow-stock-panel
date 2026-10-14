@@ -24,7 +24,10 @@ OPENAI_COMPAT_PROVIDER = "openai_compat"
 OPENAI_PROVIDER = "openai"
 CODEX_CLI_PROVIDER = "codex_cli"
 CODEX_DEFAULT_COMMAND = "codex"
-CODEX_SUPPORTED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
+CODEX_MODEL_CATALOG_TTL_SECONDS = 900
+CODEX_MODEL_CATALOG_TIMEOUT_SECONDS = 20
+CODEX_MODEL_CATALOG_MAX_PAGES = 20
+CODEX_MODEL_CATALOG_PAGE_SIZE = 100
 OPENAI_DEFAULT_REASONING_EFFORT = "high"
 # OpenAI 系两种请求协议: chat.completions (兼容面最广) 与 Responses (官方新协议)。
 CHAT_COMPLETIONS_PROTOCOL = "chat_completions"
@@ -74,6 +77,8 @@ _CODEX_ENV_ALLOWLIST = (
 Message = dict[str, str]
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_CODEX_MODEL_CATALOG_CACHE: dict = {"models": [], "fetched_at": None}
+_CODEX_MODEL_CATALOG_LOCK = asyncio.Lock()
 
 
 # ----------------------------------------------------------------
@@ -164,6 +169,15 @@ def current_ai_model() -> str:
     if current_ai_provider() == CODEX_CLI_PROVIDER:
         return current_codex_model()
     return current_openai_model()
+
+
+def current_codex_effective_model() -> str:
+    """Configured Codex model, or the local config's model when following CLI default."""
+    configured = current_codex_model()
+    if configured:
+        return configured
+    local_model = _read_codex_config().get("model")
+    return normalize_codex_model(str(local_model or ""))
 
 
 def current_openai_reasoning_effort() -> str:
@@ -263,7 +277,240 @@ def normalize_codex_model(model: str) -> str:
 
 def normalize_codex_reasoning_effort(effort: str | None) -> str:
     value = (effort or "").strip().lower()
-    return value if value in CODEX_SUPPORTED_REASONING_EFFORTS else ""
+    return value if re.fullmatch(r"[a-z0-9_-]{1,64}", value) else ""
+
+
+async def codex_model_catalog(*, force_refresh: bool = False) -> dict:
+    """Return the local Codex App Server model catalog with bounded caching.
+
+    App Server's model/list is a model catalog, not an entitlement check. A
+    selected model is only proven usable when the subsequent inference succeeds.
+    """
+    cache = _CODEX_MODEL_CATALOG_CACHE
+    fetched_at = cache.get("fetched_at")
+    if (
+        not force_refresh
+        and fetched_at
+        and time.time() - cache.get("fetched_at_epoch", 0) < CODEX_MODEL_CATALOG_TTL_SECONDS
+    ):
+        return {
+            "models": list(cache["models"]),
+            "fetched_at": fetched_at,
+            "stale": False,
+            "error": None,
+        }
+
+    async with _CODEX_MODEL_CATALOG_LOCK:
+        cache = _CODEX_MODEL_CATALOG_CACHE
+        fetched_at = cache.get("fetched_at")
+        if (
+            not force_refresh
+            and fetched_at
+            and time.time() - cache.get("fetched_at_epoch", 0) < CODEX_MODEL_CATALOG_TTL_SECONDS
+        ):
+            return {
+                "models": list(cache["models"]),
+                "fetched_at": fetched_at,
+                "stale": False,
+                "error": None,
+            }
+        try:
+            async with asyncio.timeout(CODEX_MODEL_CATALOG_TIMEOUT_SECONDS):
+                models = await _fetch_codex_model_catalog()
+        except TimeoutError:
+            error = "Codex 模型目录请求超时"
+            if cache.get("fetched_at"):
+                return {
+                    "models": list(cache["models"]),
+                    "fetched_at": cache["fetched_at"],
+                    "stale": True,
+                    "error": error,
+                }
+            return {"models": [], "fetched_at": None, "stale": False, "error": error}
+        except Exception as exc:  # noqa: BLE001 — discovery must not erase saved model settings
+            error = str(exc).strip() or "Codex 模型目录读取失败"
+            if cache.get("fetched_at"):
+                return {
+                    "models": list(cache["models"]),
+                    "fetched_at": cache["fetched_at"],
+                    "stale": True,
+                    "error": error,
+                }
+            return {"models": [], "fetched_at": None, "stale": False, "error": error}
+
+        fetched_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        _CODEX_MODEL_CATALOG_CACHE.clear()
+        _CODEX_MODEL_CATALOG_CACHE.update(
+            models=models,
+            fetched_at=fetched_at,
+            fetched_at_epoch=time.time(),
+        )
+        return {"models": list(models), "fetched_at": fetched_at, "stale": False, "error": None}
+
+
+async def _fetch_codex_model_catalog() -> list[dict]:
+    """Read paginated model/list metadata from a temporary local app-server."""
+    run_path = Path(tempfile.mkdtemp(prefix="tickflow-codex-models-"))
+    process: asyncio.subprocess.Process | None = None
+    try:
+        codex_home_path = run_path / "codex-home"
+        workspace_path = run_path / "workspace"
+        codex_home_path.mkdir()
+        workspace_path.mkdir()
+        _prepare_codex_home(codex_home_path)
+        process = await asyncio.create_subprocess_exec(
+            *_codex_base_command(),
+            "app-server",
+            "--listen",
+            "stdio://",
+            cwd=str(workspace_path),
+            env=_codex_process_env(codex_home_path),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            limit=4 * 1024 * 1024,
+        )
+        await _codex_app_server_request(
+            process,
+            1,
+            "initialize",
+            {"clientInfo": {
+                "name": "tickflow-stock-panel",
+                "title": "Tick Stock Panel",
+                "version": "1.0.0",
+            }},
+        )
+        await _codex_app_server_notification(process, "initialized", {})
+
+        models: list[dict] = []
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        for request_id in range(2, CODEX_MODEL_CATALOG_MAX_PAGES + 2):
+            params: dict = {"limit": CODEX_MODEL_CATALOG_PAGE_SIZE, "includeHidden": False}
+            if cursor:
+                params["cursor"] = cursor
+            result = await _codex_app_server_request(process, request_id, "model/list", params)
+            page = result.get("data") if isinstance(result, dict) else None
+            if not isinstance(page, list):
+                raise RuntimeError("Codex model/list 响应缺少 data 数组")
+            models.extend(_normalize_codex_model_entry(item) for item in page)
+            models = [item for item in models if item is not None]
+            next_cursor = result.get("nextCursor") if isinstance(result, dict) else None
+            if not next_cursor:
+                return models
+            cursor = str(next_cursor)
+            if cursor in seen_cursors:
+                raise RuntimeError("Codex model/list 分页游标重复")
+            seen_cursors.add(cursor)
+        raise RuntimeError("Codex model/list 超过最大分页数")
+    finally:
+        if process is not None:
+            await _close_codex_app_server(process)
+        await asyncio.to_thread(_remove_tree_best_effort, run_path)
+
+
+def _normalize_codex_model_entry(raw: object) -> dict | None:
+    if not isinstance(raw, dict) or raw.get("hidden") is True:
+        return None
+    model_id = raw.get("model") or raw.get("id")
+    if not isinstance(model_id, str) or not model_id.strip():
+        return None
+    efforts: list[dict] = []
+    raw_efforts = raw.get("supportedReasoningEfforts")
+    if isinstance(raw_efforts, list):
+        for item in raw_efforts:
+            if isinstance(item, str):
+                effort, description = item, ""
+            elif isinstance(item, dict):
+                effort = item.get("reasoningEffort") or item.get("effort")
+                description = item.get("description") or ""
+            else:
+                continue
+            valid_effort = isinstance(effort, str) and re.fullmatch(
+                r"[a-z0-9_-]{1,64}", effort.strip().lower(),
+            )
+            if valid_effort:
+                efforts.append({
+                    "reasoning_effort": effort.strip().lower(),
+                    "description": str(description),
+                })
+    return {
+        "model": model_id.strip(),
+        "display_name": str(raw.get("displayName") or model_id).strip(),
+        "description": str(raw.get("description") or "").strip(),
+        "supported_reasoning_efforts": efforts,
+        "default_reasoning_effort": str(raw.get("defaultReasoningEffort") or "").strip().lower(),
+        "is_default": raw.get("isDefault") is True,
+    }
+
+
+async def _codex_app_server_request(
+    process: asyncio.subprocess.Process,
+    request_id: int,
+    method: str,
+    params: dict,
+) -> dict:
+    if process.stdin is None or process.stdout is None:
+        raise RuntimeError("Codex App Server stdio 不可用")
+    payload = json.dumps(
+        {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
+        ensure_ascii=False,
+    ).encode("utf-8") + b"\n"
+    process.stdin.write(payload)
+    await process.stdin.drain()
+    deadline = asyncio.get_running_loop().time() + CODEX_MODEL_CATALOG_TIMEOUT_SECONDS
+    while True:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise RuntimeError("Codex 模型目录请求超时")
+        try:
+            line = await asyncio.wait_for(process.stdout.readline(), timeout=remaining)
+        except TimeoutError as exc:
+            raise RuntimeError("Codex 模型目录请求超时") from exc
+        if not line:
+            raise RuntimeError("Codex App Server 提前关闭连接")
+        try:
+            message = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(message, dict) or message.get("id") != request_id:
+            continue
+        if message.get("error"):
+            error = message["error"]
+            detail = error.get("message") if isinstance(error, dict) else str(error)
+            raise RuntimeError(f"Codex {method} 失败: {str(detail or '未知错误')[:300]}")
+        result = message.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError(f"Codex {method} 响应格式无效")
+        return result
+
+
+async def _codex_app_server_notification(
+    process: asyncio.subprocess.Process,
+    method: str,
+    params: dict,
+) -> None:
+    if process.stdin is None:
+        raise RuntimeError("Codex App Server stdin 不可用")
+    payload = json.dumps(
+        {"jsonrpc": "2.0", "method": method, "params": params}, ensure_ascii=False,
+    ).encode("utf-8") + b"\n"
+    process.stdin.write(payload)
+    await process.stdin.drain()
+
+
+async def _close_codex_app_server(process: asyncio.subprocess.Process) -> None:
+    if process.stdin is not None:
+        process.stdin.close()
+    try:
+        await asyncio.wait_for(process.wait(), timeout=2)
+    except TimeoutError:
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=2)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
 
 
 def normalize_codex_command(command: str | None, *, strict: bool = True) -> str:
@@ -469,6 +716,7 @@ def _parse_tool_arguments(raw: str) -> dict:
 async def stream_ai_text(
     messages: Sequence[Message],
     *,
+    model: str | None = None,
     temperature: float | None = 0.5,
     max_tokens: int | None = 4000,
     timeout: float = 180.0,
@@ -483,9 +731,15 @@ async def stream_ai_text(
     max_tokens=None 表示不限制输出(同 generate_ai_text 的说明)。
     """
     max_tokens = _resolve_max_tokens(max_tokens)
+    selected_model = (model or "").strip() or current_ai_model()
     _check_input_budget(messages, max_tokens=max_tokens)
     if is_codex_cli_provider():
-        yield await _run_codex_cli(messages, max_tokens=max_tokens, timeout=max(timeout, 600.0))
+        yield await _run_codex_cli(
+            messages,
+            max_tokens=max_tokens,
+            timeout=max(timeout, 600.0),
+            model=selected_model,
+        )
         return
 
     if is_responses_protocol():
@@ -496,6 +750,7 @@ async def stream_ai_text(
             temperature=temperature,
             max_tokens=max_tokens,
             timeout=timeout,
+            model=selected_model,
         ):
             yield chunk
         return
@@ -506,6 +761,7 @@ async def stream_ai_text(
         max_tokens=max_tokens,
         timeout=timeout,
         prefer_final_answer=prefer_final_answer,
+        model=selected_model,
     ):
         yield chunk
 
@@ -577,13 +833,14 @@ async def _stream_openai(
     max_tokens: int | None,
     timeout: float,
     prefer_final_answer: bool,
+    model: str | None = None,
 ) -> AsyncIterator[str]:
     ai_key = secrets_store.get_ai_key()
     if not ai_key:
         raise RuntimeError("AI API Key 未配置, 请在设置页配置")
 
     client = _openai_client(ai_key, timeout)
-    model = current_ai_model()
+    model = (model or "").strip() or current_ai_model()
     base_url = secrets_store.get_ai_config("ai_base_url", settings.ai_base_url)
     req_messages = list(messages)
 
@@ -935,6 +1192,7 @@ async def _run_codex_cli(
     *,
     max_tokens: int | None,
     timeout: float,
+    model: str | None = None,
 ) -> str:
     prompt = _codex_prompt(messages, max_tokens=max_tokens)
     run_path = Path(tempfile.mkdtemp(prefix="tickflow-codex-run-"))
@@ -959,9 +1217,9 @@ async def _run_codex_cli(
             "--output-last-message",
             str(output_path),
         ]
-        model = current_ai_model().strip()
-        if model:
-            args.extend(["--model", model])
+        selected_model = (model or "").strip() or current_ai_model().strip()
+        if selected_model:
+            args.extend(["--model", selected_model])
         args.extend(["--cd", str(workspace_path), "-"])
 
         env = _codex_process_env(codex_home_path)

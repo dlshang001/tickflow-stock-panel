@@ -699,7 +699,7 @@ async def test_codex_exec_args_exclude_ephemeral(monkeypatch):
     captured: dict = {}
 
     def fake_run_process(args, prompt, env, timeout):
-        captured["args"] = list(args)
+        captured.setdefault("runs", []).append(list(args))
         return 0, b"ok", b""
 
     monkeypatch.setattr(ai_provider, "_codex_base_command", lambda: ["codex"])
@@ -713,8 +713,194 @@ async def test_codex_exec_args_exclude_ephemeral(monkeypatch):
     out = await ai_provider._run_codex_cli(
         [{"role": "user", "content": "hi"}], max_tokens=None, timeout=1.0,
     )
+    explicit = await ai_provider._run_codex_cli(
+        [{"role": "user", "content": "hi"}],
+        max_tokens=None,
+        timeout=1.0,
+        model="selected-model",
+    )
     assert out == "ok"
-    args = captured["args"]
-    assert "--ephemeral" not in args
-    assert "exec" in args and "--skip-git-repo-check" in args
-    assert args[args.index("--model") + 1] == "gpt-5.6-sol"
+    assert explicit == "ok"
+    default_args, explicit_args = captured["runs"]
+    for args in captured["runs"]:
+        assert "--ephemeral" not in args
+        assert "exec" in args and "--skip-git-repo-check" in args
+    assert default_args[default_args.index("--model") + 1] == "gpt-5.6-sol"
+    assert explicit_args[explicit_args.index("--model") + 1] == "selected-model"
+
+
+def test_normalize_codex_model_entry_uses_discovered_efforts():
+    item = ai_provider._normalize_codex_model_entry({
+        "model": "new-codex-model",
+        "displayName": "New Model",
+        "description": "Fresh from local CLI",
+        "supportedReasoningEfforts": [
+            {"reasoningEffort": "very_high", "description": "More reasoning"},
+            {"reasoningEffort": "fast-mode"},
+        ],
+        "defaultReasoningEffort": "very_high",
+        "isDefault": True,
+    })
+    assert item == {
+        "model": "new-codex-model",
+        "display_name": "New Model",
+        "description": "Fresh from local CLI",
+        "supported_reasoning_efforts": [
+            {"reasoning_effort": "very_high", "description": "More reasoning"},
+            {"reasoning_effort": "fast-mode", "description": ""},
+        ],
+        "default_reasoning_effort": "very_high",
+        "is_default": True,
+    }
+    assert ai_provider._normalize_codex_model_entry({"model": "hidden", "hidden": True}) is None
+
+
+def test_current_codex_effective_model_uses_local_default_when_unset(monkeypatch):
+    monkeypatch.setattr(ai_provider, "current_codex_model", lambda: "")
+    monkeypatch.setattr(ai_provider, "_read_codex_config", lambda: {"model": "local-default-model"})
+    assert ai_provider.current_codex_effective_model() == "local-default-model"
+
+
+@pytest.mark.asyncio
+async def test_fetch_codex_model_catalog_reads_all_pages(monkeypatch):
+    import json
+
+    class FakeStdin:
+        def __init__(self):
+            self.writes: list[bytes] = []
+
+        def write(self, data):
+            self.writes.append(data)
+
+        async def drain(self):
+            return None
+
+        def close(self):
+            return None
+
+    class FakeStdout:
+        def __init__(self, messages):
+            self.messages = iter(messages)
+
+        async def readline(self):
+            return next(self.messages, b"")
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdin = FakeStdin()
+            self.stdout = FakeStdout([
+                json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}).encode() + b"\n",
+                json.dumps({"jsonrpc": "2.0", "id": 2, "result": {
+                    "data": [{"model": "model-one", "supportedReasoningEfforts": ["high"]}],
+                    "nextCursor": "page-2",
+                }}).encode() + b"\n",
+                json.dumps({"jsonrpc": "2.0", "id": 3, "result": {
+                    "data": [{"model": "model-two"}], "nextCursor": None,
+                }}).encode() + b"\n",
+            ])
+            self.returncode = 0
+
+        async def wait(self):
+            return 0
+
+    process = FakeProcess()
+    captured = {}
+
+    async def fake_create(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return process
+
+    monkeypatch.setattr(ai_provider.asyncio, "create_subprocess_exec", fake_create)
+    monkeypatch.setattr(ai_provider, "_codex_base_command", lambda: ["codex"])
+    monkeypatch.setattr(ai_provider, "_prepare_codex_home", lambda path: None)
+    monkeypatch.setattr(ai_provider, "_codex_process_env", lambda path: {"CODEX_HOME": str(path)})
+    monkeypatch.setattr(ai_provider, "_remove_tree_best_effort", lambda path: None)
+
+    models = await ai_provider._fetch_codex_model_catalog()
+
+    assert [item["model"] for item in models] == ["model-one", "model-two"]
+    sent = [json.loads(line) for line in process.stdin.writes]
+    assert [message.get("method") for message in sent] == [
+        "initialize", "initialized", "model/list", "model/list",
+    ]
+    assert sent[0]["params"]["clientInfo"] == {
+        "name": "tickflow-stock-panel",
+        "title": "Tick Stock Panel",
+        "version": "1.0.0",
+    }
+    assert sent[2]["params"] == {"limit": 100, "includeHidden": False}
+    assert sent[3]["params"]["cursor"] == "page-2"
+    assert captured["args"][:5] == ("codex", "app-server", "--listen", "stdio://")[:5]
+    assert captured["kwargs"]["stderr"] == ai_provider.asyncio.subprocess.DEVNULL
+
+
+@pytest.mark.asyncio
+async def test_codex_model_catalog_cache_and_stale_fallback(monkeypatch):
+    import time
+
+    cache = ai_provider._CODEX_MODEL_CATALOG_CACHE
+    cache.clear()
+    cache.update(
+        models=[{"model": "cached-model"}],
+        fetched_at="2026-01-01T00:00:00Z",
+        fetched_at_epoch=time.time() - ai_provider.CODEX_MODEL_CATALOG_TTL_SECONDS - 5,
+    )
+
+    async def fail_fetch():
+        raise RuntimeError("app-server unavailable")
+
+    monkeypatch.setattr(ai_provider, "_fetch_codex_model_catalog", fail_fetch)
+    stale = await ai_provider.codex_model_catalog(force_refresh=True)
+    assert stale["models"][0]["model"] == "cached-model"
+    assert stale["stale"] is True
+    assert stale["error"] == "app-server unavailable"
+
+    cache.clear()
+    unavailable = await ai_provider.codex_model_catalog(force_refresh=True)
+    assert unavailable["models"] == []
+    assert unavailable["error"] == "app-server unavailable"
+
+
+@pytest.mark.asyncio
+async def test_codex_model_catalog_applies_total_timeout_and_returns_stale(monkeypatch):
+    import asyncio
+    import time
+
+    cache = ai_provider._CODEX_MODEL_CATALOG_CACHE
+    cache.clear()
+    cache.update(
+        models=[{"model": "cached-model"}],
+        fetched_at="2026-01-01T00:00:00Z",
+        fetched_at_epoch=time.time() - ai_provider.CODEX_MODEL_CATALOG_TTL_SECONDS - 5,
+    )
+    monkeypatch.setattr(ai_provider, "CODEX_MODEL_CATALOG_TIMEOUT_SECONDS", 0.01)
+
+    async def slow_fetch():
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(ai_provider, "_fetch_codex_model_catalog", slow_fetch)
+    result = await ai_provider.codex_model_catalog(force_refresh=True)
+
+    assert result["models"] == [{"model": "cached-model"}]
+    assert result["stale"] is True
+    assert result["error"] == "Codex 模型目录请求超时"
+
+
+@pytest.mark.asyncio
+async def test_stream_ai_text_passes_selected_model_to_codex(monkeypatch):
+    captured = {}
+
+    async def fake_codex(messages, **kwargs):
+        captured.update(kwargs)
+        return "analysis"
+
+    monkeypatch.setattr(ai_provider, "_resolve_max_tokens", lambda value: value)
+    monkeypatch.setattr(ai_provider, "_check_input_budget", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ai_provider, "is_codex_cli_provider", lambda: True)
+    monkeypatch.setattr(ai_provider, "_run_codex_cli", fake_codex)
+    chunks = [chunk async for chunk in ai_provider.stream_ai_text(
+        [{"role": "user", "content": "analyze"}], model="selected-model", max_tokens=None,
+    )]
+    assert chunks == ["analysis"]
+    assert captured["model"] == "selected-model"

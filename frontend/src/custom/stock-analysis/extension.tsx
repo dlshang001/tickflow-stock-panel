@@ -5,10 +5,12 @@ import { PageHeader } from '@/components/PageHeader'
 import { EmptyState } from '@/components/EmptyState'
 import { StockFinancialSearch } from '@/components/financials/StockFinancialSearch'
 import { StockPreviewDialog } from '@/components/StockPreviewDialog'
+import { ModelBadge, ModelSelect } from '@/components/ai/ModelSelect'
 import { LastStockChip } from '@/components/LastStockChip'
 import { AnalysisKChart, type PriceLevel, type LevelType } from '@/components/stock-analysis/AnalysisKChart'
 import { PriceAlertDialog } from '@/components/stock-analysis/PriceAlertDialog'
 import { api } from '@/lib/api'
+import { getSelectedModel } from '@/lib/aiModelStore'
 import { useLastStock } from '@/lib/useLastStock'
 import { QK } from '@/lib/queryKeys'
 import { toast } from '@/components/Toast'
@@ -75,7 +77,7 @@ export function StockAnalysis() {
   }
 
   const doAnalysis = async () => {
-    const r = await startAnalysis(symbol, name)
+    const r = await startAnalysis(symbol, name, '', getSelectedModel())
     if (r.error) toast(r.error, 'error')
   }
 
@@ -108,6 +110,7 @@ export function StockAnalysis() {
                 <span className="text-[10px] font-mono text-muted">{symbol}</span>
                 <ExternalLink className="h-3 w-3 text-muted opacity-0 group-hover:opacity-100 transition-opacity" />
               </button>
+              <ModelSelect disabled={checking} />
               <button
                 onClick={handleAnalyze}
                 disabled={checking}
@@ -289,6 +292,7 @@ function HistorySidebar() {
                     <div className="flex items-center gap-1.5 min-w-0">
                       <span className="text-xs font-medium text-foreground truncate">{r.name || r.symbol}</span>
                       <span className="text-[10px] font-mono text-muted shrink-0">{r.symbol}</span>
+                      <ModelBadge model={r.model} className="hidden sm:inline-flex shrink-0" />
                     </div>
                     <div className="mt-0.5 flex items-center gap-2 text-[10px] text-muted">
                       <span>{fmtRelative(r.created_at)}</span>

@@ -19,6 +19,7 @@ export interface ActiveTask {
   symbol: string
   name: string
   focus: string
+  model?: string
   phase: Phase
   content: string
   error: string
@@ -26,6 +27,7 @@ export interface ActiveTask {
     summary?: string
     levels?: Record<LevelType, PriceLevel[]>
     close?: number | null
+    model?: string | null
   } | null
   createdAt: number
   savedReportId?: string
@@ -38,6 +40,7 @@ export interface HistoryReport {
   symbol: string
   name: string
   focus: string
+  model?: string | null
   content: string
   summary?: string
   close?: number | null
@@ -157,7 +160,7 @@ export async function findTodayReport(symbol: string): Promise<HistoryReport | n
   return history.find(r => r.symbol === symbol && (r.created_at ?? '').slice(0, 10) === today) ?? null
 }
 
-export async function startAnalysis(symbol: string, name: string, focus = ''): Promise<{ id?: string; error?: string }> {
+export async function startAnalysis(symbol: string, name: string, focus = '', model?: string): Promise<{ id?: string; error?: string }> {
   const existing = activeTasks.find(t => t.symbol === symbol && (t.phase === 'loading' || t.phase === 'streaming'))
   if (existing) {
     activeDialogTaskId = existing.id
@@ -173,7 +176,7 @@ export async function startAnalysis(symbol: string, name: string, focus = ''): P
 
   const id = `stask_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
   const task: ActiveTask = {
-    id, symbol, name, focus,
+    id, symbol, name, focus, model,
     phase: 'loading', content: '', error: '',
     meta: null, createdAt: Date.now(),
   }
@@ -183,19 +186,19 @@ export async function startAnalysis(symbol: string, name: string, focus = ''): P
   rebuildSnap()
   emit()
 
-  runStream(id, symbol, name, focus)
+  runStream(id, symbol, name, focus, model)
   return { id }
 }
 
-async function runStream(id: string, symbol: string, _name: string, focus: string) {
+async function runStream(id: string, symbol: string, _name: string, focus: string, model?: string) {
   try {
     let firstDelta = true
-    for await (const chunk of api.stockAnalyzeStream(symbol, focus)) {
+    for await (const chunk of api.stockAnalyzeStream(symbol, focus, model)) {
       const cur = activeTasks.find(t => t.id === id)
       if (!cur) return
       switch (chunk.type) {
         case 'meta':
-          patchTask(id, { meta: { summary: chunk.summary, levels: chunk.levels, close: chunk.close } })
+          patchTask(id, { meta: { summary: chunk.summary, levels: chunk.levels, close: chunk.close, model: chunk.model } })
           break
         case 'delta':
           if (firstDelta) { patchTask(id, { phase: 'streaming' }); firstDelta = false }
@@ -218,7 +221,7 @@ async function runStream(id: string, symbol: string, _name: string, focus: strin
       }
       try {
         const res = await api.stockAnalysisReportSave({
-          symbol: final.symbol, name: final.name, focus: final.focus,
+          symbol: final.symbol, name: final.name, focus: final.focus, model: final.meta?.model ?? final.model,
           content: final.content, summary: final.meta?.summary ?? '',
           close: final.meta?.close ?? null, levels: final.meta?.levels,
         })
@@ -256,8 +259,8 @@ export function restoreDialog(taskId: string) {
   }
   activeDialogTaskId = taskId; dialogMinimized = false; rebuildSnap(); emit()
 }
-export async function retryAnalysis(task: { symbol: string; name: string; focus: string }): Promise<{ error?: string }> {
-  return startAnalysis(task.symbol, task.name, task.focus)
+export async function retryAnalysis(task: { symbol: string; name: string; focus: string; model?: string }): Promise<{ error?: string }> {
+  return startAnalysis(task.symbol, task.name, task.focus, task.model)
 }
 export async function deleteReport(reportId: string): Promise<void> {
   try {

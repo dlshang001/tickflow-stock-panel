@@ -516,7 +516,7 @@ async def test_generate_ai_text_routes_to_responses(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_stream_ai_text_routes_to_responses(monkeypatch):
-    async def fake_stream_text(messages, *, temperature, max_tokens, timeout):
+    async def fake_stream_text(messages, *, temperature, max_tokens, timeout, model=None):
         yield "流式"
         yield "回复"
 

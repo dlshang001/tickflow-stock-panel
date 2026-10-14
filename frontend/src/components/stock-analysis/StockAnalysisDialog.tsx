@@ -8,6 +8,8 @@ import { cn } from '@/lib/cn'
 import { copyText } from '@/lib/clipboard'
 import { toast } from '@/components/Toast'
 import { MarkdownRenderer } from '@/components/financials/MarkdownRenderer'
+import { ModelBadge, ModelSelect } from '@/components/ai/ModelSelect'
+import { getSelectedModel } from '@/lib/aiModelStore'
 import {
   type ActiveTask, type HistoryReport,
   minimizeDialog, closeDialog, startAnalysis,
@@ -38,7 +40,7 @@ function getContent(task: ActiveTask | HistoryReport | null): string {
 function getMeta(task: ActiveTask | HistoryReport | null) {
   if (!task) return null
   if ('meta' in task) return task.meta
-  return { summary: task.summary, close: task.close, levels: task.levels }
+  return { summary: task.summary, close: task.close, levels: task.levels, model: task.model }
 }
 
 export function StockAnalysisDialog({ task, mode, minimized }: Props) {
@@ -66,7 +68,7 @@ export function StockAnalysisDialog({ task, mode, minimized }: Props) {
   const handleStartNew = useCallback(async () => {
     if (!task) return
     const name = 'name' in task ? task.name : ''
-    await startAnalysis(task.symbol, name, focus.trim())
+    await startAnalysis(task.symbol, name, focus.trim(), getSelectedModel())
   }, [task, focus])
 
   const handleCopy = async () => {
@@ -114,6 +116,7 @@ export function StockAnalysisDialog({ task, mode, minimized }: Props) {
                   </span>
                   {task && <span className="text-xs text-secondary truncate">{task.name}</span>}
                   {task && <span className="text-[10px] font-mono text-muted shrink-0">{task.symbol}</span>}
+                  <ModelBadge model={meta?.model ?? (task && 'model' in task ? task.model : undefined)} />
                 </div>
                 <div className="flex items-center gap-2 mt-0.5 text-[10px] text-muted">
                   {meta?.summary ? (
@@ -219,6 +222,7 @@ export function StockAnalysisDialog({ task, mode, minimized }: Props) {
                   'focus:outline-none focus:ring-2 focus:ring-sky-400/30 transition-shadow disabled:opacity-50',
                 )}
               />
+              <ModelSelect disabled={isWorking} className="hidden sm:flex" />
               {isHistory ? (
                 <button
                   onClick={handleStartNew}
@@ -242,7 +246,7 @@ export function StockAnalysisDialog({ task, mode, minimized }: Props) {
             <p className="mt-1.5 text-[10px] text-muted/50 leading-relaxed">
               {isHistory
                 ? '历史报告为静态记录;修改关注重点后将作为新任务重新生成。报告仅供参考,不构成投资建议。'
-                : '报告由项目已配置的 AI 模型基于本地行情与财务数据生成;消息面维度暂依据价量异动推断。报告仅供参考,不构成投资建议。'}
+                : '报告由所选请求模型基于本地行情与财务数据生成;徽章记录请求模型，实际执行结果以 Codex CLI/上游响应为准。消息面维度暂依据价量异动推断。报告仅供参考,不构成投资建议。'}
             </p>
           </div>
         </motion.div>

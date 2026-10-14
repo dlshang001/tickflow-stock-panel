@@ -18,7 +18,7 @@ from datetime import timedelta
 import polars as pl
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.indicators.levels import compute_levels, summarize_levels
 from app.market_time import cn_today
@@ -151,6 +151,7 @@ class AnalyzeRequest(BaseModel):
     """AI 个股分析请求。"""
     symbol: str
     focus: str = ""  # 可选:用户追加的分析关注点
+    model: str | None = Field(default=None, max_length=200)
 
 
 @router.post("/analyze")
@@ -167,7 +168,9 @@ async def analyze_stock(request: Request, req: AnalyzeRequest):
     data_dir = repo.store.data_dir
 
     async def stream_gen():
-        async for chunk in with_heartbeat(analyze_stock_stream(repo, data_dir, req.symbol, req.focus)):
+        async for chunk in with_heartbeat(
+            analyze_stock_stream(repo, data_dir, req.symbol, req.focus, model=req.model)
+        ):
             yield chunk + "\n"
 
     return StreamingResponse(
@@ -186,6 +189,7 @@ class SaveReportRequest(BaseModel):
     symbol: str
     name: str = ""
     focus: str = ""
+    model: str | None = Field(default=None, max_length=200)
     content: str
     summary: str = ""
     close: float | None = None
@@ -205,6 +209,7 @@ def save_report(request: Request, req: SaveReportRequest):
         "symbol": req.symbol,
         "name": req.name,
         "focus": req.focus,
+        "model": req.model,
         "content": req.content,
         "summary": req.summary,
         "close": req.close,
