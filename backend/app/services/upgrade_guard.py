@@ -147,15 +147,28 @@ class UpgradeGuard:
             except OSError:
                 continue
             entry = cache.get(rel)
-            if entry and entry.get("s") == stat.st_size and entry.get("m") == stat.st_mtime_ns:
+            expected = self.manifest.get(rel)
+            if (
+                entry
+                and entry.get("s") == stat.st_size
+                and entry.get("m") == stat.st_mtime_ns
+                and entry.get("c") == stat.st_ctime_ns
+                # 已偏离基线的文件每轮复核; 快速还原时 mtime/ctime 可能都未变化。
+                and entry.get("h") == expected
+            ):
                 digest = str(entry.get("h", ""))
             else:
                 try:
                     digest = _sha256(path)
                 except OSError:
                     continue
-                cache[rel] = {"s": stat.st_size, "m": stat.st_mtime_ns, "h": digest}
-            expected = self.manifest.get(rel)
+                # 部分文件系统的 mtime_ns 在快速同尺寸覆写时可能不变；ctime_ns 可识别该变化。
+                cache[rel] = {
+                    "s": stat.st_size,
+                    "m": stat.st_mtime_ns,
+                    "c": stat.st_ctime_ns,
+                    "h": digest,
+                }
             if expected is None:
                 added.append(rel)
             elif digest != expected:
