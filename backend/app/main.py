@@ -98,6 +98,18 @@ async def _application_lifespan(app: FastAPI):
         __version__, tf_client.current_mode(),
     )
 
+    # 同步路由线程池容量: Starlette 默认 40, 本地多标签页/自动刷新与长计算
+    # 路由并存时容易排队。调大只影响空闲线程上限 (按需创建), 无常驻代价。
+    try:
+        import anyio.to_thread
+
+        anyio.to_thread.current_default_thread_limiter().total_tokens = (
+            settings.api_sync_thread_pool
+        )
+        logger.info("sync route thread pool: %d", settings.api_sync_thread_pool)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("thread pool resize failed (ignored): %s", e)
+
     # 首次启动: 若配置了 AUTH_PASSWORD 环境变量且未设过密码, 用它初始化。
     # 公网部署免 SSH 端口转发; 已设过密码则不覆盖 (改密码走 UI)。
     try:
@@ -242,6 +254,21 @@ async def _application_lifespan(app: FastAPI):
         timer.start()
     except Exception as e:  # noqa: BLE001
         logger.warning("integrity boot check scheduling failed: %s", e)
+
+    # 启动自愈: 上次进程异常退出可能残留 enriched 发布标记 (state=publishing),
+    # 会让所有读写持续报"数据正在发布", 且停止实时行情后没有写入方来接管。
+    # 本进程刚启动、不可能持有活跃发布, 因此可直接判定残留并在锁内恢复。
+    try:
+        from app.enriched_generation import recover_stale_publications
+
+        recovered_publications = recover_stale_publications(store.data_dir)
+        if recovered_publications:
+            logger.warning(
+                "已恢复上次中断的 enriched 发布标记: %s",
+                ", ".join(recovered_publications),
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("enriched 发布标记自愈失败 (不影响启动): %s", e)
 
     # 企业微信智能机器人长连接(可选通道, 失败不阻断启动)
     try:
@@ -659,22 +686,32 @@ async def capability_denied_handler(request: Request, exc: CapabilityDenied) -> 
     )
 
 # 生产期静态文件(前端 dist)
-_static = Path(settings.static_dir)
-if _static.exists():
-    if (_static / "assets").exists():
-        app.mount("/assets", StaticFiles(directory=_static / "assets"), name="assets")
+def _register_static_routes(target: FastAPI, static_dir: Path) -> None:
+    """挂载前端构建产物: /assets 走静态服务, 根级文件直出, 其余回退 SPA。
 
-    @app.get("/{full_path:path}", include_in_schema=False)
-    def spa_fallback(full_path: str):  # noqa: ARG001
-        """所有未匹配路径回退到 index.html — React Router 接管。
+    根级静态文件 (favicon.svg / donate-wechat.jpg 等) 必须原样返回。此前所有
+    未匹配路径都回退 index.html, 浏览器把 HTML 当图标解析失败, Docker 与桌面
+    安装包的浏览器页签因此没有图标。
+    """
+    if (static_dir / "assets").exists():
+        target.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")
 
-        index.html 禁止缓存 (Cache-Control: no-store), 确保浏览器每次拿到
-        最新版本引用的 JS/CSS 文件名 (assets 带 hash, 可长缓存)。
-        """
-        index = _static / "index.html"
+    @target.get("/{full_path:path}", include_in_schema=False)
+    def spa_fallback(full_path: str):
+        # 只直出 dist 根目录文件 (单段路径); index.html 仍走下方 no-store 分支。
+        if full_path and "/" not in full_path and full_path not in (".", ".."):
+            asset = static_dir / full_path
+            if full_path != "index.html" and asset.is_file():
+                return FileResponse(asset)
+        index = static_dir / "index.html"
         if index.exists():
             return FileResponse(
                 index,
                 headers={"Cache-Control": "no-store, must-revalidate"},
             )
         return {"error": "frontend not built"}
+
+
+_static = Path(settings.static_dir)
+if _static.exists():
+    _register_static_routes(app, _static)
