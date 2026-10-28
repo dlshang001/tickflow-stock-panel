@@ -4,6 +4,7 @@ import { motion } from 'framer-motion'
 import { ScanSearch, Clock, TrendingUp, Star, Filter, Layers, Network, Sparkles, RefreshCw, Settings2, Store, RotateCcw, X, SlidersHorizontal } from 'lucide-react'
 import { api, genRuleId, type ScreenerStrategy, type ScreenerResult } from '@/lib/api'
 import { fetchMinuteBatchIncremental } from '@/lib/minuteBatchIncremental'
+import { fetchDailyBatchChunked } from '@/lib/klineBatchChunked'
 import { DEFAULT_STRATEGY_NOTIFY_EVENTS } from '@/lib/strategyMonitorEvents'
 import { toast } from '@/components/Toast'
 import { useDataStatus, usePreferences, useCapabilities, useQuoteStatus } from '@/lib/useSharedQueries'
@@ -37,6 +38,7 @@ import {
   buildExtColumnsParam,
   loadScreenerColumnConfig,
   saveScreenerColumnConfig,
+  refreshExtColumns,
   type ColumnConfig,
 } from '@/lib/screener-columns'
 
@@ -131,6 +133,20 @@ export function Screener() {
     setColumns(next)
     saveScreenerColumnConfig(next)
   }, [])
+
+  // 扩展表 schema: 用实时字段标签刷新 ext 列显示名 (快照是添加时刻的, 编辑
+  // 字段后不跟随)。与列定制弹窗同一 query key, 共享缓存; 无 ext 列时不请求。
+  // 引用相等收敛 — 无变化时 setColumns 传原引用, 不触发重渲染。
+  const hasExtColumns = columns.some(c => c.source.type === 'ext')
+  const extSchema = useQuery({
+    queryKey: QK.extDataSchemaAll,
+    queryFn: api.extDataSchemaAll,
+    enabled: hasExtColumns,
+    staleTime: 60_000,
+  })
+  useEffect(() => {
+    setColumns(prev => refreshExtColumns(prev, extSchema.data?.items))
+  }, [extSchema.data])
 
   const extColumnsParam = useMemo(() => buildExtColumnsParam(columns), [columns])
 
@@ -569,7 +585,8 @@ export function Screener() {
   const resultSymbolsKey = dailyKSymbols.join(',')
   const klineBatch = useQuery({
     queryKey: QK.screenerKlineBatch(`${resultSymbolsKey}|${candleDays}`),
-    queryFn: () => api.klineDailyBatch(dailyKSymbols, candleDays),
+    // 后端单次 symbols 上限 400, 千级行结果按 300/块分块拉取合并
+    queryFn: () => fetchDailyBatchChunked(dailyKSymbols, candleDays),
     enabled: dailyKVisible && dailyKSymbols.length > 0,
     staleTime: 5 * 60_000,
     placeholderData: previousData => previousData,
@@ -618,12 +635,12 @@ export function Screener() {
     () => [...new Set(intradaySymbols)].sort(),
     [intradaySymbols],
   )
-  const intradaySymbolsKey = intradayRequestSymbols.join(',')
 
   const minuteBatch = useQuery({
-    queryKey: QK.minuteBatch(intradaySymbolsKey),
+    queryKey: QK.minuteBatch(),
     // 增量轮询: 读缓存以最后一根为 since 只拉新增, 本地合并为完整序列
-    queryFn: () => fetchMinuteBatchIncremental(qc, QK.minuteBatch(intradaySymbolsKey), intradayRequestSymbols, fullMinuteHealthy),
+    // (缓存 key 与自选页共享, 按 symbol 合并; 请求集已被截断到 batch 上限内)
+    queryFn: () => fetchMinuteBatchIncremental(qc, intradayRequestSymbols, fullMinuteHealthy),
     enabled: intradayVisible && intradayRequestSymbols.length > 0,
     staleTime: 10_000,
     placeholderData: previousData => previousData,
@@ -640,7 +657,7 @@ export function Screener() {
     [columns],
   )
   const extChartColsKey = extChartColumns
-    .map(c => `${(c.source as { configId: string }).configId}.${(c.source as { fieldName: string }).fieldName}`)
+    .map(c => `${(c.source as { configId: string }).configId}.${(c.source as { fieldName: string }).fieldName}:${c.extDisplay?.chartDays ?? 10}`)
     .join(',')
   const extChartSymbolsKey = useMemo(
     () => [...new Set(displayRows.map((r: any) => r.symbol as string))].sort().join(','),
@@ -652,7 +669,7 @@ export function Screener() {
       const symbols = extChartSymbolsKey ? extChartSymbolsKey.split(',') : []
       const entries = await Promise.all(extChartColumns.map(async c => {
         const src = c.source as { type: 'ext'; configId: string; fieldName: string }
-        const r = await api.extDataSeries(src.configId, src.fieldName, asOf || undefined, symbols)
+        const r = await api.extDataSeries(src.configId, src.fieldName, asOf || undefined, symbols, c.extDisplay?.chartDays || 10)
         return [`${src.configId}.${src.fieldName}`, r.items ?? {}] as const
       }))
       return Object.fromEntries(entries) as Record<string, Record<string, [string, number][]>>
@@ -1298,6 +1315,10 @@ export function Screener() {
         title="自定义策略结果列"
         builtinSectionLabel="策略内置列"
         extColumnAlign="center"
+        baselineStore={{
+          get: () => storage.screenerResultColumnsBaseline.get(null) as ColumnConfig[] | null,
+          set: cols => storage.screenerResultColumnsBaseline.set(cols),
+        }}
       />
 
       <StockPreviewDialog

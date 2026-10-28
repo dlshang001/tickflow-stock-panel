@@ -29,8 +29,12 @@
   同用桶中心。右侧量带画分钟成交量柱 (按分钟涨跌红绿, 分桶防亚像素);
   分钟量柱仅 volume 开启时出现, 竞价量柱不受 volume 开关控制
 - 只配价格无量字段且 volume 关 (或量数据缺失) 时, 保持全幅价格渲染 (与无竞价逐像素一致)
+
+React.memo: rows 引用由上游收敛 (Watchlist 的 minuteData 出口 reuseUnchangedSeries,
+见 lib/series-identity) — 实时行情 tick 中价格未动的行跳过整棵 SVG 重渲染。
+调用方传 rows 时必须用共享空数组常量 (EMPTY_ROWS), 不要 `?? []` 新建引用。
 */
-import { useId } from 'react'
+import { memo, useId } from 'react'
 import type { MinuteKlineRow } from '@/lib/api'
 import { AUCTION_WIDTH_RATIOS, type AuctionBarWidth } from '@/lib/list-columns'
 
@@ -154,16 +158,18 @@ function buildAuctionBars(axis: AuctionAxis, match: AuctionPt[], unmatched: Auct
   return bars
 }
 
-/** 盘前无分钟K时的竞价单独渲染 (整幅宽度)。时间轴/量柱与主体窄栏共用同一套
- * (buildAuctionAxis/buildAuctionBars), 仅价格纵轴换成本图自身区间;
- * 配了量字段时同样上下分区 (价格上/量带下), 整幅无第二态, 不加窄栏底色。 */
-function AuctionOnly({ rows, prevClose, match, unmatched, width, height }: {
+/** 盘前无分钟K时的竞价渲染: 竞价只占左侧窄栏 (与有分钟K时同一宽度档),
+ *  右侧连续竞价区留空 (虚线分隔 + 淡字提示), 不再整幅铺满 — 整幅铺满会让
+ *  用户以为竞价曲线就是分时走势。时间轴/量柱与主体窄栏共用同一套
+ *  (buildAuctionAxis/buildAuctionBars), 仅价格纵轴换成本图自身区间。 */
+function AuctionOnly({ rows, prevClose, match, unmatched, width, height, auctionWidth = 'standard' }: {
   rows: AuctionPt[]
   prevClose?: number | null
   match?: [string, number][]
   unmatched?: [string, number][]
   width: number
   height: number
+  auctionWidth?: AuctionBarWidth
 }) {
   const BULL = '#C74040'
   const BEAR = '#2D9B65'
@@ -183,6 +189,10 @@ function AuctionOnly({ rows, prevClose, match, unmatched, width, height }: {
   // m/u 过滤落点 (rows 已由调用方以同一 filterAuctionPoints 过滤)
   const m = filterAuctionPoints(match)
   const u = filterAuctionPoints(unmatched)
+  // 竞价窄栏宽度 (与有分钟K时同档), 右侧留给"暂无分时"占位
+  const paneGap = 4
+  const auctionW = Math.max(24, Math.round((W - paneGap) * (AUCTION_WIDTH_RATIOS[auctionWidth] ?? AUCTION_WIDTH_RATIOS.standard)))
+  const plotX0 = auctionW + paneGap
   // 上下分区: 配了量字段时价格区止于 64%, 量带独立在底 (与主体同一比例)
   const hasVol = m.length > 0 || u.length > 0
   const priceBottom = hasVol ? Math.round(H * 0.64) : H - padY
@@ -190,29 +200,43 @@ function AuctionOnly({ rows, prevClose, match, unmatched, width, height }: {
   const bottomY = H - padY
   const volTop = hasVol ? priceBottom + 2 : bottomY
   const volBandH = bottomY - volTop
-  const axis = buildAuctionAxis([rows, m, u], W)
+  const axis = buildAuctionAxis([rows, m, u], auctionW)
   const bars = buildAuctionBars(axis, m, u, { volBandH, bandTop: volTop, bottomY, gold: LINE_MATCH, bull: BULL, bear: BEAR })
   // 价格点 x = 所在桶中心 (与量柱逐点对齐; 末点 circle 同映射)
   const xAtT = (t: number) => axis.xAt(axis.bucketIndex(t))
   return (
-    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} className="block" aria-label="集合竞价">
-      <line x1={0} y1={y(baseline)} x2={W} y2={y(baseline)} stroke={LINE_PREV_CLOSE} strokeWidth={0.6} opacity={0.7} />
+    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} className="block" aria-label="集合竞价 (暂无分时)">
+      {/* 竞价窄栏底色 + 右侧留白区分两栏 */}
+      <rect x={0} y={0} width={auctionW} height={H} fill={LINE_PREV_CLOSE} opacity={0.08} />
+      <line
+        x1={plotX0 - paneGap / 2} y1={0} x2={plotX0 - paneGap / 2} y2={H}
+        stroke={LINE_PREV_CLOSE} strokeWidth={0.5} opacity={0.25}
+      />
+      <line x1={0} y1={y(baseline)} x2={auctionW} y2={y(baseline)} stroke={LINE_PREV_CLOSE} strokeWidth={0.6} opacity={0.7} />
       {bars.map((b, i) => (
         <rect key={i} x={b.x} y={b.y} width={b.w} height={b.h} fill={b.fill} opacity={b.opacity} />
       ))}
       {hasVol && (
-        <line x1={0} y1={volTop - 1} x2={W} y2={volTop - 1} stroke={LINE_PREV_CLOSE} strokeWidth={0.5} opacity={0.25} />
+        <line x1={0} y1={volTop - 1} x2={auctionW} y2={volTop - 1} stroke={LINE_PREV_CLOSE} strokeWidth={0.5} opacity={0.25} />
       )}
       <polyline
         points={rows.map(p => `${xAtT(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ')}
         fill="none" stroke={color} strokeWidth={1.1} strokeLinejoin="round" strokeLinecap="round"
       />
       <circle cx={xAtT(rows[rows.length - 1].t)} cy={y(last)} r={1.4} fill={color} />
+      {/* 右侧连续竞价区: 无分钟数据提示 (浅灰, 不抢视觉) */}
+      <text
+        x={plotX0 + (W - plotX0) / 2} y={H / 2}
+        textAnchor="middle" dominantBaseline="middle"
+        fill={LINE_PREV_CLOSE} fontSize={8} opacity={0.55}
+      >
+        暂无分时
+      </text>
     </svg>
   )
 }
 
-export function MiniIntraday({ rows, prevClose, changePct, width = 100, height = 56, yMode = 'adaptive', limitRate = null, auction = null, volume = false, auctionWidth = 'standard' }: {
+export const MiniIntraday = memo(function MiniIntraday({ rows, prevClose, changePct, width = 100, height = 56, yMode = 'adaptive', limitRate = null, auction = null, volume = false, auctionWidth = 'standard' }: {
   rows: MinuteKlineRow[]
   /** 昨收价 (前收), 用于基准线。无则用 close/changePct 反算 */
   prevClose?: number | null
@@ -251,7 +275,7 @@ export function MiniIntraday({ rows, prevClose, changePct, width = 100, height =
     if (auctionPriceRaw.length < 2) {
       return <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} className="block" aria-label="暂无分时" />
     }
-    return <AuctionOnly rows={auctionPriceRaw} prevClose={prevClose} match={auction?.match} unmatched={auction?.unmatched} width={W} height={H} />
+    return <AuctionOnly rows={auctionPriceRaw} prevClose={prevClose} match={auction?.match} unmatched={auction?.unmatched} width={W} height={H} auctionWidth={auctionWidth} />
   }
 
   const n = rows.length
@@ -508,4 +532,4 @@ export function MiniIntraday({ rows, prevClose, changePct, width = 100, height =
       />
     </svg>
   )
-}
+})
