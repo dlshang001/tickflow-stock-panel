@@ -8,6 +8,7 @@ import { toast } from '@/components/Toast'
 const BASE = ''
 
 type RequestOptions = RequestInit & {
+  responseType?: 'json' | 'blob'
   /** 为 true 时不弹错误 toast（由调用方自行汇总提示，如多图串行队列） */
   quiet?: boolean
   /** 请求超时毫秒数; null 关闭。默认 30s — 后端依赖 polars, 偶发挂起时无超时
@@ -47,7 +48,7 @@ const COMPUTE_REQUEST_TIMEOUT_MS = 300_000
 const extPullTimeoutMs = (timeoutSeconds?: number) => (timeoutSeconds ?? 30) * 1000 + 10_000
 
 async function request<T>(path: string, init?: RequestOptions): Promise<T> {
-  const { quiet, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, ...fetchInit } = init ?? {}
+  const { quiet, responseType = 'json', timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, ...fetchInit } = init ?? {}
   const isFormData = fetchInit.body instanceof FormData
   const headers: Record<string, string> = {}
   if (!isFormData) headers['Content-Type'] = 'application/json'
@@ -94,7 +95,7 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
     if (res.status !== 401 && !quiet) toast(msg, 'error')
     throw new ApiError(msg, res.status)
   }
-  return res.json() as Promise<T>
+  return (responseType === 'blob' ? res.blob() : res.json()) as Promise<T>
 }
 
 // ===== Capabilities =====
@@ -750,7 +751,8 @@ export interface AiReviewReport {
 
 // ===== 龙虎榜 (fuyao 专有, 复盘页) =====
 export interface DragonTigerStockItem {
-  thscode: string
+  /** 后端已归一 (缺失时由 ticker 推导); 旧缓存/异常数据源可能为 null, 消费方需兜底 */
+  thscode: string | null
   ticker?: string | null
   name?: string | null
   change?: number | null      // 当日涨跌幅 (小数制)
@@ -947,7 +949,7 @@ export interface AiIterateResult {
 export interface CustomSignalCondition {
   left: string     // 字段名
   op: string       // > >= < <= == !=
-  right: string    // "field:xxx" 或数字字符串
+  right: string | number  // "field:xxx" 或数字常量 (迁移的历史信号常量为 number, 后端两者均合法)
   leftDays?: number   // 左字段取几日前 (0=当日, 默认)
   rightDays?: number  // 右字段取几日前 (仅 right 为字段时有意义)
 }
@@ -1616,6 +1618,8 @@ export interface MiningLockStatus {
     host?: string
     schema_version?: number
   } | null
+  /** 持有者线索来源: 锁文件内容 / 旧格式锁经操作系统扫描反查 */
+  holder_source?: 'file' | 'os-scan' | null
   holder_alive: boolean
   pid_consistent: boolean
   active_runs: number
@@ -1890,6 +1894,56 @@ export interface StrategyBacktestTrade {
   exit_signal_id?: string | null
 }
 
+export interface BacktestEvidenceCheck {
+  kind: string
+  cutoff: string
+  status: 'completed' | 'error'
+  differences: number
+  compared_values: number
+  error?: string
+  examples: {
+    date: string; symbol: string; field: string; cutoff: string
+    baseline: number | string | boolean | null
+    recomputed: number | string | boolean | null
+  }[]
+}
+
+export interface BacktestEvidence {
+  schema_version: number
+  run_id: string
+  created_at: string
+  runtime: { application: string; python: string; polars: string; numpy: string; code_sha256: string }
+  config: Record<string, unknown>
+  config_sha256: string
+  strategy: { id: string; backend: string; sha256: string; changed_during_run: boolean }
+  data: {
+    sha256: string
+    origin: string
+    asset_type: string
+    daily_price_basis: string
+    datasets: Record<string, {
+      sha256: string; fields: Record<string, string>; rows: number; symbols: number | null
+      start: string | null; end: string | null
+    }>
+  }
+  reproducibility_sha256: string
+  lookahead: {
+    status: 'passed' | 'failed' | 'partial' | 'error' | 'insufficient' | 'cancelled'
+    sampled: boolean
+    differences: number
+    checks: BacktestEvidenceCheck[]
+    reports: { scope: string; status: string; checks: BacktestEvidenceCheck[]; differences: number }[]
+  }
+  persistence: { status: 'saved' | 'error'; error?: string }
+  execution_timing?: {
+    status: 'passed' | 'failed' | 'insufficient'
+    compared_values: number
+    differences: number
+    examples: { symbol: string; side: string; signal_date: string; fill_date: string }[]
+  }
+  limitations: string[]
+}
+
 export interface StrategyBacktestResult {
   run_id: string
   config: Record<string, any>
@@ -1933,6 +1987,7 @@ export interface StrategyBacktestResult {
   }
   elapsed_ms: number
   error: string | null
+  evidence?: BacktestEvidence | null
 }
 
 // ===== Settings =====
@@ -2046,7 +2101,57 @@ export interface DataSourceItem {
 }
 
 /** 内置可选插件数据源 (plugins/ 目录, 需手动装依赖) */
+export interface SourcePackagePreview {
+  manifest: { name: string; display_name?: string; version: string; author?: string; description?: string; datasets: string[] }
+  digest: string
+  errors: string[]
+  installed_version: string | null
+  pending_version?: string | null
+  revision?: string
+}
+
+export interface ExtensionPackagePreview {
+  manifest: { id: string; display_name?: string; version: string; author?: string; description?: string; backend: string; frontend?: string }
+  digest: string
+  revision: string
+  errors: string[]
+  files: string[]
+  installed_version: string | null
+  pending_version?: string | null
+}
+
+export interface ManagedExtensionPackage {
+  id: string
+  name: string
+  version?: string | null
+  pending_version?: string | null
+  previous_version?: string | null
+  runtime_version?: string | null
+  enabled: boolean
+  frontend?: boolean
+  status: string
+  error: string
+  pending_remove?: boolean
+  failed_version?: string | null
+  revision?: string
+}
+
+export type ImportCenterPreview =
+  | { kind: 'resources'; preview: ResourceTransferPreview }
+  | { kind: 'backup'; preview: ConfigBackupInspect }
+  | { kind: 'source'; preview: SourcePackagePreview }
+  | { kind: 'extension'; preview: ExtensionPackagePreview }
+  | { kind: 'page'; preview: { filename: string; size: number; digest: string; source: boolean; suggested_id: string } }
+
 export interface PluginDataSourceItem {
+  can_test?: boolean
+  origin?: 'builtin' | 'external'
+  version?: string
+  enabled?: boolean
+  pending_version?: string | null
+  previous_version?: string | null
+  pending_remove?: boolean
+  update_error?: string | null
   name: string
   display_name: string
   datasets: string[]
@@ -2122,6 +2227,7 @@ export interface DataSourcesResponse {
 }
 
 export interface DataSourceTestResult {
+  error?: string
   provider: string
   dataset: string
   rows: number
@@ -2239,6 +2345,38 @@ export interface DefinitionsCatalogItem {
   error?: string
 }
 
+export type ResourceKind = 'strategy' | 'signal' | 'factor'
+export interface ResourceRef { kind: ResourceKind; id: string }
+export interface TransferResource extends ResourceRef { label: string; description?: string; source?: string; draft?: boolean }
+export interface ResourceTransferEntry {
+  key: string
+  kind: ResourceKind | 'settings' | 'code'
+  id: string
+  label: string
+  path: string
+  dependencies: string[]
+  local_dependencies: string[]
+  issues: string[]
+  action: 'create' | 'reuse' | 'conflict'
+  draft?: boolean
+  comparison?: { local: string; incoming: string; truncated: boolean } | null
+  referenced_by?: string[]
+}
+export interface ResourceTransferPreview {
+  roots: string[]
+  entries: ResourceTransferEntry[]
+  counts: Record<string, number>
+  revision: string
+}
+export interface ResourceTransferResult {
+  imported: number
+  reused: number
+  counts: Record<ResourceKind, number>
+  resources: string[]
+  changed: string[]
+  drafts?: string[]
+}
+
 /** 导入冒烟结果 (POST /api/definitions/smoke) */
 export interface DefinitionSmokeResult {
   ok: boolean
@@ -2254,25 +2392,6 @@ export interface ConfigBackupApplyResult {
   skipped_unselected: number
   out_of_scope_files: number
   reload_hints: Record<string, boolean>
-}
-
-/** 策略包条目预览 (POST /api/strategies/bundle/inspect) */
-export interface StrategyBundleEntry {
-  path: string
-  kind: 'strategies' | 'strategy_overrides' | 'custom_signals' | 'custom_factors'
-  id: string
-  action: 'create' | 'conflict'
-  bytes: number
-}
-
-export interface StrategyBundleInspect {
-  strategy_id: string
-  label: string
-  created_at?: string
-  counts: Record<string, number>
-  warnings: string[]
-  missing_deps: string[]
-  entries: StrategyBundleEntry[]
 }
 
 export interface Preferences {
@@ -2469,6 +2588,8 @@ export interface RuntimePagePack {
   sha256: string
   uploaded_at: number
   error: string
+  managed_by?: string
+  version?: string
 }
 
 // ===== 升级保护 (二次开发) =====
@@ -2667,10 +2788,14 @@ export const api = {
     request<{ ok: boolean }>('/api/settings/ai', { method: 'DELETE' }),
 
   /** 草稿连通性测试 — 只验证当前表单值, 不保存任何配置 */
-  testAiSettings: (ai: { provider?: string; base_url?: string; api_key?: string; model?: string; protocol?: string }) =>
+  testAiSettings: (
+    ai: { provider?: string; base_url?: string; api_key?: string; model?: string; protocol?: string },
+    opts?: { timeoutMs?: number },
+  ) =>
     request<{ ok: boolean; model?: string; response?: string; error?: string; error_type?: string }>('/api/settings/ai/test', {
       method: 'POST',
       body: JSON.stringify(ai),
+      ...(opts?.timeoutMs != null ? { timeoutMs: opts.timeoutMs } : {}),
     }),
 
   upgradeGuardStatus: () => request<UpgradeGuardStatus>('/api/upgrade-guard/status'),
@@ -2707,6 +2832,50 @@ export const api = {
     }),
 
   preferences: () => request<Preferences>('/api/settings/preferences'),
+  importCenterInspect: (files: File[]) => {
+    const body = new FormData()
+    files.forEach(file => body.append('files', file))
+    return request<ImportCenterPreview>('/api/import-center/inspect', { method: 'POST', body, quiet: true, timeoutMs: 120_000 })
+  },
+  extensionPackages: () => request<ManagedExtensionPackage[]>('/api/extension-packages'),
+  installExtensionPackage: (file: File, digest: string, revision: string) => {
+    const body = new FormData()
+    body.append('file', file); body.append('digest', digest); body.append('revision', revision); body.append('trusted', 'true')
+    return request<{ id: string; message: string }>('/api/extension-packages/install', { method: 'POST', body, quiet: true })
+  },
+  extensionPackageFrontend: (file: File, digest: string) => {
+    const body = new FormData()
+    body.append('file', file); body.append('digest', digest); body.append('trusted', 'true')
+    return request<Blob>('/api/extension-packages/frontend', { method: 'POST', body, responseType: 'blob', quiet: true })
+  },
+  manageExtensionPackage: (id: string, action: string, revision?: string) =>
+    request<{ id: string; message: string }>('/api/extension-packages/' + encodeURIComponent(id) + '/manage', {
+      method: 'POST', body: JSON.stringify({ action, revision }), quiet: true,
+    }),
+  importCenterInstallPage: (file: File, id: string, digest: string, overwrite: boolean) => {
+    const body = new FormData()
+    body.append('file', file); body.append('id', id); body.append('digest', digest)
+    body.append('trusted', 'true'); body.append('overwrite', String(overwrite))
+    return request<RuntimePagePack>('/api/import-center/page', { method: 'POST', body, quiet: true, timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS })
+  },
+  importCenterProjectPage: (namespace: string, id: string, overwrite: boolean) =>
+    request<RuntimePagePack>('/api/import-center/project', { method: 'POST', body: JSON.stringify({ namespace, id, overwrite, trusted: true }), quiet: true, timeoutMs: COMPUTE_REQUEST_TIMEOUT_MS }),
+  inspectSourcePackage: (file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    return request<SourcePackagePreview>('/api/custom/source-packages/inspect', { method: 'POST', body, quiet: true })
+  },
+  installSourcePackage: (file: File, digest: string, revision?: string) => {
+    const body = new FormData()
+    body.append('file', file)
+    body.append('digest', digest)
+    if (revision) body.append('revision', revision)
+    return request<{ name: string; message: string }>('/api/custom/source-packages/install', { method: 'POST', body, quiet: true, timeoutMs: 120_000 })
+  },
+  manageSourcePackage: (name: string, action: string) =>
+    request<{ name: string; message: string }>(`/api/custom/source-packages/${encodeURIComponent(name)}/manage`, {
+      method: 'POST', body: JSON.stringify({ action }), quiet: true,
+    }),
   dataSources: () => request<DataSourcesResponse>('/api/settings/data-sources'),
   capabilityMatrix: () => request<CapabilityMatrix>('/api/settings/capability-matrix'),
   dataSource: (name: string) => request<CustomSourceConfig>(`/api/settings/data-sources/${encodeURIComponent(name)}`),
@@ -2832,6 +3001,7 @@ export const api = {
       scanned_dates: number
       scanned_symbols: number
       complete_dates: string[]
+      inactive_symbol_days?: number
       gaps: MinuteGapRow[]
       summary_by_date: { date: string; gap_symbols: number; missing_bars: number; expected_bars: number }[]
       truncated: boolean
@@ -3230,6 +3400,11 @@ export const api = {
     request<{ status: string; symbol: string; rows: number }>('/api/kline/sync_minute_single', {
       method: 'POST',
       body: JSON.stringify({ symbol, ...(days != null ? { days } : {}) }),
+    }),
+  repairMinuteGaps: (symbols: string[]) =>
+    request<{ status: string; job_id: string }>('/api/kline/repair_minute_gaps', {
+      method: 'POST',
+      body: JSON.stringify({ symbols }),
     }),
   clearMinute: () =>
     request<{ status: string; removed: number }>('/api/kline/clear_minute', {
@@ -3707,6 +3882,9 @@ export const api = {
       method: 'DELETE',
     }),
 
+  strategyBacktestEvidence: (runId: string) =>
+    request<BacktestEvidence>(`/api/backtest/strategy/runs/${encodeURIComponent(runId)}/evidence`),
+
   strategyBacktestRun: (payload: {
     strategy_id: string
     symbols?: string[] | null
@@ -3779,6 +3957,19 @@ export const api = {
     ),
 
   dataStatus: () => request<DataStatus>('/api/data/status'),
+  dataIntegrity: () => request<{
+    report: IntegrityReport | null
+    blocking_assets?: IntegrityAsset[]
+    data_revisions?: DailyDataRevisions
+  }>('/api/data/integrity'),
+  scanDataIntegrity: (lookbackDays: number, assetTypes: IntegrityAsset[]) =>
+    request<{ job_id: string }>('/api/data/integrity/scan', {
+      method: 'POST', body: JSON.stringify({ lookback_days: lookbackDays, asset_types: assetTypes }),
+    }),
+  repairDataIntegrity: (reportId: string) =>
+    request<{ job_id: string }>('/api/data/integrity/repair', {
+      method: 'POST', body: JSON.stringify({ report_id: reportId }),
+    }),
   dataClear: () => request<{ deleted_files: number }>('/api/data/clear', { method: 'POST' }),
   refreshCache: () => request<{ ok: boolean }>('/api/data/refresh-cache', { method: 'POST' }),
   enrichedSchema: (table: string) => request<EnrichedField[]>(`/api/data/schema/${table}`),
@@ -3944,6 +4135,28 @@ export const api = {
   },
 
   // ── 统一定义目录 / 导入冒烟 (P4) ──
+  resourcesList: () => request<{ items: TransferResource[] }>('/api/definitions/resources'),
+  resourcesExportPreview: (resources: ResourceRef[], signal?: AbortSignal) =>
+    request<ResourceTransferPreview>('/api/definitions/resources/export/preview', {
+      method: 'POST', body: JSON.stringify({ resources }), signal, quiet: true,
+    }),
+  resourcesExport: (resources: ResourceRef[], revision?: string) =>
+    request<Blob>('/api/definitions/resources/export', {
+      method: 'POST', body: JSON.stringify({ resources, revision }), responseType: 'blob', quiet: true,
+    }),
+  resourcesInspect: (files: File[]) => {
+    const body = new FormData()
+    files.forEach(file => body.append('files', file))
+    return request<ResourceTransferPreview>('/api/definitions/resources/inspect', { method: 'POST', body, quiet: true })
+  },
+  resourcesApply: (files: File[], selected: string[], overwrite: string[], revision: string) => {
+    const body = new FormData()
+    files.forEach(file => body.append('files', file))
+    body.append('selected', JSON.stringify(selected))
+    body.append('overwrite', JSON.stringify(overwrite))
+    body.append('revision', revision)
+    return request<ResourceTransferResult>('/api/definitions/resources/apply', { method: 'POST', body, quiet: true })
+  },
 
   definitionsList: () =>
     request<{ items: DefinitionsCatalogItem[] }>('/api/definitions'),
@@ -4728,31 +4941,6 @@ export const api = {
   strategyGetSource: (id: string) =>
     request<{ code: string; source: string }>(`/api/strategies/${id}/source`),
 
-  // 策略包 (bundle): 依赖感知的导出/导入 — 策略 .py + 引用的信号/因子定义 + 用户调参。
-  // 导出走浏览器原生下载 (同配置备份直链模式)。
-  strategyBundleExportUrl: (strategyId: string) =>
-    `/api/strategies/${encodeURIComponent(strategyId)}/bundle`,
-
-  strategyBundleInspect: (file: File) => {
-    const fd = new FormData()
-    fd.append('file', file)
-    return request<StrategyBundleInspect>('/api/strategies/bundle/inspect', {
-      method: 'POST',
-      body: fd,
-    })
-  },
-
-  strategyBundleApply: (file: File, allowOverwrite: boolean) => {
-    const fd = new FormData()
-    fd.append('file', file)
-    fd.append('allow_overwrite', allowOverwrite ? 'true' : 'false')
-    return request<ConfigBackupApplyResult>('/api/strategies/bundle/apply', {
-      method: 'POST',
-      body: fd,
-      timeoutMs: 120_000,
-    })
-  },
-
   strategyBuild: (step: number, payload: Record<string, any>) =>
     request<StrategyBuildResult>(
       '/api/strategies/build',
@@ -4863,6 +5051,7 @@ export interface PipelineJob {
   finished_at: string | null
   duration_s: number | null
   result: {
+    integrity_report?: IntegrityReport
     universe_size?: number
     daily_days?: number
     adj_factor_symbols?: number
@@ -4880,6 +5069,37 @@ export interface PipelineJob {
 export type PipelineJobSummary = Omit<PipelineJob, 'log'>
 
 // ===== Data status =====
+export type IntegrityAsset = 'stock' | 'etf' | 'index'
+export type DailyDataRevisions = Partial<Record<IntegrityAsset, string>>
+
+export interface IntegrityReport {
+  version: 1
+  id: string
+  checked_at: string
+  start_date: string
+  end_date: string
+  lookback_days: number
+  asset_types: IntegrityAsset[]
+  status: 'clean' | 'issues' | 'uncertain' | 'empty'
+  repairable_count: number
+  uncertain_count: number
+  no_data_assets: IntegrityAsset[]
+  backup_dir?: string
+  repair_error?: string
+  data_revisions?: DailyDataRevisions
+  issues: {
+    asset_type: IntegrityAsset
+    asset_label: string
+    date: string
+    kind: string
+    kind_label: string
+    reason: string
+    repairable: boolean
+    symbols: string[]
+    symbol_count: number
+  }[]
+}
+
 interface TableStats {
   rows: number
   earliest_date: string | null
@@ -4938,12 +5158,14 @@ export interface DataStatus {
     ext_data_files?: number
     ext_data_size_mb?: number
     total_size_mb: number
-  }
+  } | null  // busy 降级 (预热/同步/修复期间) 且冷启动缓存未热时为 null, 不代表无数据
   next_pipeline_run: string | null
   next_instruments_run: string | null
   last_pipeline_run: string | null
   last_instruments_run: string | null
   checked_at: string
+  /** 预热/同步/修复期间统计暂不可用或仅为旧缓存, 空值不代表无数据。 */
+  stats_pending?: boolean
   indicators_ready?: boolean
 }
 

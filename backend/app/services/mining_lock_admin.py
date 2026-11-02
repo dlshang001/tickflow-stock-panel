@@ -28,6 +28,7 @@ from app.services.mining_jobs import ACTIVE_RUN_STATUSES
 from app.services.mining_process_lock import (
     MiningProcessLock,
     MiningProcessLockError,
+    locate_lock_holder_pid,
     probe_lock_held,
     read_lock_holder,
 )
@@ -48,15 +49,30 @@ class MiningLockAdminError(ValueError):
 def lock_status(
     data_dir: Path | str,
     *,
+    lock: MiningProcessLock | None = None,
     self_pid: int | None = None,
     now: float | None = None,
     stale_after: float = STALE_AFTER_SECONDS,
 ) -> dict[str, Any]:
     """汇总挖掘锁状态: 是否被持有、持有者线索、是否允许强制释放。"""
     pid = os.getpid() if self_pid is None else self_pid
-    held = probe_lock_held(data_dir)
+    owns_lock = lock is not None and lock.acquired
+    held = owns_lock or probe_lock_held(data_dir)
     holder = read_lock_holder(data_dir)
-    mine = held and bool(holder) and holder.get("pid") == pid
+    holder_source = "file" if holder else None
+    if owns_lock and (holder is None or holder.get("pid") != pid):
+        # Windows denies reads of the locked byte through a second handle,
+        # even in this process. The live owned handle is authoritative.
+        holder = {"pid": pid, "role": "app"}
+        holder_source = None
+    if held and not owns_lock and holder is None:
+        # 旧格式/损坏内容 (典型: 旧版本残留后端进程): 从 OS 层面反查持有者,
+        # 让这类锁也能走人工确认的强制释放, 而不是让用户手动猜进程。
+        located_pid = locate_lock_holder_pid(data_dir)
+        if located_pid is not None:
+            holder = {"pid": located_pid, "role": "unknown"}
+            holder_source = "os-scan"
+    mine = owns_lock or (held and bool(holder) and holder.get("pid") == pid)
     holder_pid = holder.get("pid") if holder else None
     holder_alive = _pid_alive(holder_pid) if holder_pid else False
     pid_consistent = (
@@ -80,6 +96,7 @@ def lock_status(
         "held": held,
         "mine": mine,
         "holder": holder,
+        "holder_source": holder_source,
         "holder_alive": holder_alive,
         "pid_consistent": pid_consistent,
         "active_runs": active_runs,
@@ -99,7 +116,7 @@ def force_release(
     stale_after: float = STALE_AFTER_SECONDS,
 ) -> dict[str, Any]:
     """终止陈旧持有者并让本进程接管锁; 任何不满足条件的情况直接拒绝。"""
-    status = lock_status(data_dir, stale_after=stale_after)
+    status = lock_status(data_dir, lock=lock, stale_after=stale_after)
     if not status["force_releasable"]:
         raise MiningLockAdminError(status["reason"] or "不可强制释放")
     if lock.acquired:
@@ -149,7 +166,10 @@ def _classify(
     if mine:
         return False, "锁由当前后端持有"
     if not holder_known:
-        return False, "锁文件为旧格式或不可读, 无法定位持有进程 — 请手动查找并结束它"
+        return False, (
+            "锁文件为旧格式或不可读, 且无法从系统层面定位持有进程 — "
+            "请手动结束后端残留进程后重启面板"
+        )
     if not holder_alive:
         # 内核会在进程退出时释放 flock, 理论上到不了这里; 防御性兜底
         return False, "持有者进程已不存在, 锁应已释放 — 请刷新状态"
