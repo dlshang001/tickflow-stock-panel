@@ -315,6 +315,8 @@ def iter_daily_frames(
     from app.data_providers import custom
 
     provider_name = preferences.get_daily_data_provider()
+    logger.info("日K修补取数: provider=%s asset=%s symbols=%d start=%s end=%s",
+                provider_name, asset_type, len(symbols), start_time.isoformat(), end_time.isoformat())
     if provider_name != "tickflow" and custom.provider_has_dataset(provider_name, "daily"):
         found = False
         for frame in iter_custom_daily_frames(
@@ -327,6 +329,9 @@ def iter_daily_frames(
         # 非股票源沿用指数/ETF 原有的「明确不支持时回退」契约。
         if found or asset_type == "stock":
             return
+        logger.warning("日K源 %s 未返回 %s 数据, 修补回退 TickFlow", provider_name, asset_type)
+    elif provider_name != "tickflow":
+        logger.warning("数据源 %s 未提供 daily 能力, 修补回退 TickFlow", provider_name)
     if not capset.has(Cap.KLINE_DAILY_BATCH):
         raise RuntimeError("当前日K数据源不可用, 请检查数据源配置")
     limit = resolve_limit(capset, Cap.KLINE_DAILY_BATCH, default_batch=100)
@@ -882,7 +887,7 @@ def _enforce_minute_beijing_wallclock(df: pl.DataFrame, *, source: str) -> pl.Da
     return df
 
 
-def _normalize_minute(df_in, default_symbol: str | None = None) -> pl.DataFrame:
+def _normalize_minute(df_in, default_symbol: str | None = None, *, source: str = "tickflow") -> pl.DataFrame:
     """把 SDK 返回的分钟 K 数据规范成 canonical 列 (datetime 收口为北京墙钟)。"""
     if df_in is None or len(df_in) == 0:
         return pl.DataFrame()
@@ -922,7 +927,7 @@ def _normalize_minute(df_in, default_symbol: str | None = None) -> pl.DataFrame:
 
     if "datetime" in df.columns:
         # 时区契约守卫: 须在下方通用 us-cast 之前, 避免带时区列被静默剥成 UTC-naive
-        df = _enforce_minute_beijing_wallclock(df, source="tickflow")
+        df = _enforce_minute_beijing_wallclock(df, source=source)
 
     if "symbol" not in df.columns and default_symbol is not None:
         df = df.with_columns(pl.lit(default_symbol).alias("symbol"))
@@ -1019,10 +1024,10 @@ def _write_minute_partition(df: pl.DataFrame, minute_dir) -> int:
             touched = new_rows["symbol"].unique().to_list()
             same = existing.filter(pl.col("symbol").is_in(touched))
             other = existing.filter(~pl.col("symbol").is_in(touched))
-            merged = pl.concat([same, new_rows]).unique(
+            merged = pl.concat([same, new_rows], how="diagonal_relaxed").unique(
                 subset=["symbol", "datetime"], keep="last",
             )
-            day_df = pl.concat([other, merged])
+            day_df = pl.concat([other, merged], how="diagonal_relaxed")
         else:
             day_df = day_df.drop("_trade_date")
         day_df = day_df.sort("symbol", "datetime")
@@ -1133,7 +1138,7 @@ def _try_custom_minute(
         return (pl.DataFrame(), False)
     try:
         # 时区契约守卫: 插件/自定义源帧同样收口为北京墙钟 (CONTRIBUTING §3.3)
-        df = _enforce_minute_beijing_wallclock(df, source=provider_name)
+        df = _normalize_minute(df, source=provider_name)
     except Exception as e:  # noqa: BLE001
         logger.warning(
             "custom minute provider %s datetime 契约校验失败; not falling back to TickFlow: %s",

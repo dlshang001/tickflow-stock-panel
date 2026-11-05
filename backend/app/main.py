@@ -8,8 +8,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from app import __version__
 from app.api import (
@@ -62,11 +61,15 @@ from app.extensions.loader import (
     current_extension_context,
     start_backend_extensions,
 )
+from app.frontend_static import FrontendStaticFiles, frontend_file_response
 from app.jobs import daily_pipeline
 from app.services.daily_health import DailyIntegrityError
+from app.services.heavy_job_limiter import HeavyJobLimitTimeoutError
 from app.services.matrix_prewarm_owner import MatrixCachePrewarmOwner
 from app.services.mining_process_lock import MiningProcessLock, MiningProcessLockError
 from app.services.quote_service import QuoteService
+from app.services.shared_work import WorkBusyError
+from app.startup_diagnostics import startup_phase
 from app.tickflow import client as tf_client
 from app.tickflow.policy import detect_capabilities
 from app.tickflow.repository import DataStore, KlineRepository
@@ -110,14 +113,17 @@ async def _application_lifespan(app: FastAPI):
     # 首次启动: 若配置了 AUTH_PASSWORD 环境变量且未设过密码, 用它初始化。
     # 公网部署免 SSH 端口转发; 已设过密码则不覆盖 (改密码走 UI)。
     try:
-        from app.services import auth as auth_service
-        auth_service.bootstrap_from_env()
+        with startup_phase(logger, "auth bootstrap"):
+            from app.services import auth as auth_service
+            auth_service.bootstrap_from_env()
     except Exception as e:  # noqa: BLE001
         logger.warning("auth bootstrap failed: %s", e)
 
     # 数据层
-    store = DataStore()
-    repo = KlineRepository(store)
+    with startup_phase(logger, "data store initialization"):
+        store = DataStore()
+    with startup_phase(logger, "repository initialization"):
+        repo = KlineRepository(store)
     app.state.datastore = store
     app.state.repo = repo
     # 去内置化种子迁移必须赶在下方 refresh_cache 之前: enriched 缓存构建时
@@ -125,39 +131,46 @@ async def _application_lifespan(app: FastAPI):
     # 列缺失 (跌停恒 0、连板梯队无数据), 直到下一次缓存刷新才自愈。
     _seeded_signals = 0
     try:
-        from app.strategy import custom_signals as _cs_seed
+        with startup_phase(logger, "signal seeding"):
+            from app.strategy import custom_signals as _cs_seed
 
-        _seeded_signals = _cs_seed.seed_if_empty(store.data_dir)
+            _seeded_signals = _cs_seed.seed_if_empty(store.data_dir)
     except Exception as e:  # noqa: BLE001
         logger.warning("signal seeding failed (ignored): %s", e)
     # 自定义/复合因子载入注册表 (P3); 单个失败只跳过该因子 (fail-隔离)
-    from app.factors.store import load_into_registry
+    with startup_phase(logger, "custom factor module import"):
+        from app.factors.store import load_into_registry
 
     try:
-        loaded_factors = load_into_registry(store.data_dir)
+        with startup_phase(logger, "custom factor registration"):
+            loaded_factors = load_into_registry(store.data_dir)
         if loaded_factors:
             logger.info("custom factors loaded: %s", len(loaded_factors))
     except Exception as exc:  # noqa: BLE001
         logger.warning("custom factors load failed: %s", exc)
-    from app.services.mining_jobs import MiningRunStore
-    from app.services.mining_manager import MiningJobManager
+    with startup_phase(logger, "mining manager initialization"):
+        from app.services.mining_jobs import MiningRunStore
+        from app.services.mining_manager import MiningJobManager
 
-    mining_manager = MiningJobManager(store.data_dir)
+        mining_manager = MiningJobManager(store.data_dir)
     # A degraded instance must never rewrite another owner's live run manifests.
-    recovered_mining_runs = (
-        mining_manager.recover_interrupted() if app.state.mining_lock_acquired else 0
-    )
+    with startup_phase(logger, "mining run recovery"):
+        recovered_mining_runs = (
+            mining_manager.recover_interrupted() if app.state.mining_lock_acquired else 0
+        )
     app.state.mining_manager = mining_manager
     if recovered_mining_runs:
         logger.warning("recovered %d interrupted mining runs", recovered_mining_runs)
     # 策略守护复验: 复用挖掘的任务编排 (线程 + spawn 子进程 + 持久 run store),
     # 独立 namespace 存 run 记录; 与挖掘共用 heavy 槽 (避免双份全市场矩阵)。
-    guardian_manager = MiningJobManager(
-        store.data_dir,
-        kind="guardian",
-        store=MiningRunStore(store.data_dir, namespace="guardian"),
-    )
-    recovered_guardian_runs = guardian_manager.recover_interrupted()
+    with startup_phase(logger, "guardian manager initialization"):
+        guardian_manager = MiningJobManager(
+            store.data_dir,
+            kind="guardian",
+            store=MiningRunStore(store.data_dir, namespace="guardian"),
+        )
+    with startup_phase(logger, "guardian run recovery"):
+        recovered_guardian_runs = guardian_manager.recover_interrupted()
     app.state.guardian_manager = guardian_manager
     if recovered_guardian_runs:
         logger.warning(
@@ -166,7 +179,8 @@ async def _application_lifespan(app: FastAPI):
     # 在接受回测请求前固定 managed generation，避免首批并发 worker 各自创建版本。
     if settings.backtest_matrix_disk_cache_enabled:
         try:
-            repo.get_matrix_data_generation("stock")
+            with startup_phase(logger, "enriched generation initialization"):
+                repo.get_matrix_data_generation("stock")
         except EnrichedGenerationUnavailableError as exc:
             logger.warning("enriched generation requires a full rebuild: %s", exc)
     # 指标异步预热标志: enriched 缓存在后台线程构建, 完成后置 True
@@ -553,6 +567,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+@app.exception_handler(WorkBusyError)
+@app.exception_handler(HeavyJobLimitTimeoutError)
+async def shared_work_busy_handler(request: Request, exc: WorkBusyError) -> JSONResponse:
+    return JSONResponse(status_code=503, content={"detail": str(exc), "code": "work_busy"},
+                        headers={"Retry-After": "3"})
+
+
 # CORS: 允许局域网访问 (自托管场景, 放开所有来源)
 # 注: allow_credentials=True 与 allow_origins=['*'] 不能共存 (浏览器规范),
 # 本项目认证走 header (API Key), 不依赖 cookie, 故关闭 credentials 换取通配来源。
@@ -586,6 +607,23 @@ _AUTH_WHITELIST_EXACT = (
     # 白名单, 仍走网关 Bearer 通道
     "/api/events",
 )
+
+
+@app.middleware("http")
+async def workload_middleware(request: Request, call_next):
+    import time
+
+    from app.services.workload import workload
+
+    group = next((name for name in ("screener", "kline", "overview", "watchlist", "backtest")
+                  if request.url.path == f"/api/{name}" or request.url.path.startswith(f"/api/{name}/")), None)
+    if group is None:
+        return await call_next(request)
+    started = time.perf_counter()
+    try:
+        return await call_next(request)
+    finally:
+        workload.record(f"http.{group}", "request", elapsed_s=time.perf_counter() - started)
 
 
 @app.middleware("http")
@@ -756,8 +794,13 @@ def _register_static_routes(target: FastAPI, static_dir: Path) -> None:
     未匹配路径都回退 index.html, 浏览器把 HTML 当图标解析失败, Docker 与桌面
     安装包的浏览器页签因此没有图标。
     """
+    # 旧客户端可能缓存了 text/plain 的 JS/CSS。使用版本化资源地址，连带
+    # 相对路径动态 import 的分块一起绕过旧缓存；保留 /assets 兼容旧链接。
+    asset_base = f"/_static/{__version__}/assets"
     if (static_dir / "assets").exists():
-        target.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")
+        assets = FrontendStaticFiles(directory=static_dir / "assets")
+        target.mount("/assets", assets, name="assets")
+        target.mount(asset_base, assets, name="versioned-assets")
 
     @target.get("/{full_path:path}", include_in_schema=False)
     def spa_fallback(full_path: str):
@@ -765,11 +808,14 @@ def _register_static_routes(target: FastAPI, static_dir: Path) -> None:
         if full_path and "/" not in full_path and full_path not in (".", ".."):
             asset = static_dir / full_path
             if full_path != "index.html" and asset.is_file():
-                return FileResponse(asset)
+                return frontend_file_response(asset)
         index = static_dir / "index.html"
         if index.exists():
-            return FileResponse(
-                index,
+            markup = index.read_text(encoding="utf-8")
+            for quote in ('"', "'"):
+                markup = markup.replace(f"{quote}/assets/", f"{quote}{asset_base}/")
+            return HTMLResponse(
+                markup,
                 headers={"Cache-Control": "no-store, must-revalidate"},
             )
         return {"error": "frontend not built"}
