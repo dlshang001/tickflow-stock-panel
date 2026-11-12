@@ -16,6 +16,7 @@ import {
   REGIME_STATE_COLORS,
 } from '@/lib/api'
 import { QK } from '@/lib/queryKeys'
+import { selectableStrategies, strategyChoiceGroups, strategyOptionLabel } from '@/lib/strategyLibrary'
 import { setUiPref } from '@/lib/uiPrefs'
 import { groupParams, visibleParams } from '@/lib/strategyParams'
 import { storage } from '@/lib/storage'
@@ -979,6 +980,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
   const [saved] = useState(() => storage.strategyBacktestLast.get(null))
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(saved?.selectedStrategy ?? null)
   const [strategyGroup, setStrategyGroup] = useState<StrategyGroup>('all')
+  const [libraryGroup, setLibraryGroup] = useState('all')
   const [symbols, setSymbols] = useState(saved?.symbols ?? '')
   const [assetType, setAssetType] = useState<'stock' | 'etf'>(saved?.assetType ?? 'stock')
   const [start, setStart] = useState(saved?.start ?? THREE_MONTHS_AGO)
@@ -1107,9 +1109,14 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
     queryFn: () => api.screenerStrategies(assetType, 'all'),
   })
   const strategyList = useMemo(() => strategies.data?.presets ?? [], [strategies.data])
-  const filteredStrategyList = useMemo(() => (
-    strategyGroup === 'all' ? strategyList : strategyList.filter(st => st.source === strategyGroup)
-  ), [strategyGroup, strategyList])
+  const libraryGroups = useMemo(() => strategyChoiceGroups(strategyList), [strategyList])
+  const effectiveLibraryGroup = libraryGroup === 'all' || libraryGroups.some(group => group.id === libraryGroup)
+    ? libraryGroup : 'all'
+  const filteredStrategyList = useMemo(() => selectableStrategies(strategyList, selectedStrategy ? [selectedStrategy] : [])
+    .filter(st => (st.id === selectedStrategy && st.library?.archived)
+      || ((strategyGroup === 'all' || st.source === strategyGroup)
+        && (effectiveLibraryGroup === 'all' || (st.library?.group ?? '') === effectiveLibraryGroup))),
+  [strategyGroup, strategyList, selectedStrategy, effectiveLibraryGroup])
   // 校验 localStorage 里保存的上次选中策略是否仍存在(本地开发残留的自定义策略
   // 拉新代码后会失效,导致 strategyGet 一直 404/加载中)。列表就绪后若失效,
   // 连带清除其专属的 params/overrides/result(这些是该策略的运行配置/产物,
@@ -1792,6 +1799,15 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
                 </button>
               ))}
             </div>
+            {libraryGroups.some(group => group.id) && (
+              <div className="border-b border-border/60 p-1">
+                <select aria-label="策略分组" value={effectiveLibraryGroup} onChange={event => setLibraryGroup(event.target.value)}
+                  className="w-full rounded-btn border border-border bg-base px-2 py-1 text-xs text-secondary focus:border-accent focus:outline-none">
+                  <option value="all">全部分组</option>
+                  {libraryGroups.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}
+                </select>
+              </div>
+            )}
             <div className="flex flex-wrap gap-1 overflow-y-auto p-1" style={{ maxHeight: strategyListMaxH }}>
             {strategies.isLoading && (
               <span className="text-xs text-muted px-2 py-1">加载中…</span>
@@ -1809,7 +1825,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
                     : 'border-border bg-base text-secondary hover:border-accent/40'
                   }`}
               >
-                <span className="font-medium">{st.name}</span>
+                <span className="font-medium">{strategyOptionLabel(st)}</span>
                 {st.timeframes?.includes('1m') && (
                   <span className="ml-1 text-[8px] px-1 py-px rounded border border-sky-500/30 bg-sky-500/10 text-sky-400">分钟</span>
                 )}
@@ -2166,7 +2182,7 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
                 hover:border-accent/40 hover:text-accent disabled:cursor-not-allowed disabled:opacity-50"
             >
               <RefreshCw className="h-3.5 w-3.5" />
-              强制重跑
+              重跑
             </button>
           </div>
         )}
@@ -2408,8 +2424,8 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
               <span>候选样本 <b className="text-foreground num">{result.stats.n_candidates ?? 0}</b> (标的×信号日)</span>
               <span>信号天数 <b className="text-foreground num">{result.stats.n_days ?? 0}</b></span>
               <span>日均候选 <b className="text-foreground num">{result.stats.avg_daily_candidates ?? 0}</b></span>
-              <span>最佳 <b className="text-bull num">{fmtPct(result.stats.best)}</b></span>
-              <span>最差 <b className="text-bear num">{fmtPct(result.stats.worst)}</b></span>
+              <span>最佳 <b className={`num ${priceColorClass(result.stats.best)}`}>{fmtPct(result.stats.best)}</b></span>
+              <span>最差 <b className={`num ${priceColorClass(result.stats.worst)}`}>{fmtPct(result.stats.worst)}</b></span>
               <span>基准(上证) <b className="text-foreground num">{fmtPct(result.stats.benchmark_return)}</b></span>
             </div>
 
@@ -2860,8 +2876,8 @@ export function StrategyBacktest({ loadCandidate, onLoadConsumed }: {
                             {fmtPct(r.total_return)}
                           </td>
                           <td className="px-4 py-2 text-right num">{fmtPct(r.win_rate)}</td>
-                          <td className="px-4 py-2 text-right num text-bull">{fmtPct(r.best)}</td>
-                        <td className="px-4 py-2 text-right num text-bear">{fmtPct(r.worst)}</td>
+                          <td className={`px-4 py-2 text-right num ${priceColorClass(r.best)}`}>{fmtPct(r.best)}</td>
+                        <td className={`px-4 py-2 text-right num ${priceColorClass(r.worst)}`}>{fmtPct(r.worst)}</td>
                       </tr>
                       ))}
                     </tbody>

@@ -94,8 +94,8 @@ function SponsorIntro() {
     <>
       本项目赞助商 · OpenAI 兼容中转，单一接口直连 400+ 主流大模型，<span className="font-medium text-amber-600 dark:text-amber-400">Claude、ChatGPT、Gemini</span> 等国际模型直连稳定不掉线。
       <span className="font-medium text-amber-600 dark:text-amber-400">DeepSeek v4.1 Flash {range}</span>，
-      <span className="text-muted">全场最高优惠 {maxPct}%</span>，
-      <span className="font-medium text-amber-600 dark:text-amber-400">邀请链接注册赠送 1000 RH 积分</span><span className="text-muted">(积分可用于视频生成)</span>。
+      <span className="text-muted">全场最高</span><span className="font-medium text-amber-600 dark:text-amber-400">优惠 {maxPct}%</span>，
+      <span>邀请链接注册享</span><span className="font-medium text-amber-600 dark:text-amber-400">首充满减</span><span className="text-muted">(满减额度以官网邀请页为准)</span>。
     </>
   )
 }
@@ -526,10 +526,10 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
         </div>
         <div className="flex shrink-0 items-center gap-2 pt-0.5">
           {testResult && (
-            <span title="测试只验证当前表单, 不会保存配置; 通过后请点「保存配置」生效"
+            <span role="status" title="测试只验证当前表单, 不会保存配置; 通过后请点「保存配置」生效"
               className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] ${testResult.ok ? 'border-bear/25 bg-bear/[0.06] text-bear' : 'border-danger/25 bg-danger/[0.06] text-danger'}`}>
               <span className={`h-1 w-1 rounded-full ${testResult.ok ? 'bg-bear' : 'bg-danger'}`} />
-              {testResult.msg}
+              {testResult.ok ? testResult.msg : '测试失败'}
             </span>
           )}
           {(configured || canTest) && (
@@ -805,10 +805,10 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
             </p>
           </div>
           <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
-            {testResult && (
+            {testResult?.ok && (
               <span title="测试只验证当前表单, 不会保存配置; 通过后请点「保存配置」生效"
-                className={`inline-flex max-w-[280px] items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] ${testResult.ok ? 'border-bear/25 bg-bear/[0.06] text-bear' : 'border-danger/25 bg-danger/[0.06] text-danger'}`}>
-                <span className={`h-1 w-1 shrink-0 rounded-full ${testResult.ok ? 'bg-bear' : 'bg-danger'}`} />
+                className="inline-flex max-w-[280px] items-center gap-1.5 rounded-full border border-bear/25 bg-bear/[0.06] px-2 py-0.5 text-[10px] text-bear">
+                <span className="h-1 w-1 shrink-0 rounded-full bg-bear" />
                 <span className="min-w-0 truncate">{testResult.msg}</span>
               </span>
             )}
@@ -828,6 +828,12 @@ export function SettingsAIPanel({ highlight }: { highlight?: string } = {}) {
             </button>
           </div>
         </div>
+
+        {testResult && !testResult.ok && (
+          <div role="alert" className="mx-5 mb-4 whitespace-pre-wrap rounded-lg bg-danger/10 px-3 py-2 text-sm leading-6 text-danger [overflow-wrap:anywhere]">
+            {testResult.msg}
+          </div>
+        )}
 
         {/* 配置文件: Key 统一存放位置, 支持外部编辑后热加载 */}
         {s?.secrets_path && (

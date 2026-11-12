@@ -20,8 +20,9 @@
 - 扩展数据与声明式分析页面：适合不需要自定义 React 交互的页面。
 - 前端源码扩展注册：`frontend/src/custom/<namespace>/extension.tsx`，支持静态页面、导航和已开放插槽。
 - 后端源码扩展注册：`backend/app/custom/<module>.py`，支持 FastAPI 路由、启动钩子和通知格式化器。
+- 核心 AI 工具调用（已实现）：`app.services.ai_provider.generate_ai_text_with_tools` 接收调用方的工具 schema 与异步执行回调，统一支持 OpenAI Chat Completions / Responses 与 Codex CLI 结构化输出。策略迭代与可选 AI 助手共用核心适配；核心不依赖 `app.custom.assistant`，其他扩展可传入自己的工具，无需注册进助手目录。接入示例见下文「复用核心 AI 工具调用」。
 - 外部后端扩展包及配套页面安装：`data/extensions/<id>/versions/<version>/`，复用现有注册契约，静态预览、重启生效、失败保留旧版本。入口为「设置 → 导入与备份」，见 [统一导入与外部后端扩展包](extension-packages.md)。
-- 当前前端插槽：`layout.navigation.extra`、`stock-preview.footer`、`watchlist.toolbar`。
+- 当前前端插槽（8 个，context 契约见下文 §3.2）：`layout.navigation.extra`、`layout.header.quick`、`settings.system.section`、`settings.data-sources.toolbar`、`settings.data-sources.detail-actions`、`stock-preview.tabs`、`stock-preview.footer`、`watchlist.toolbar`。
 - 当前后端继承点：`NotificationFormatter`。
 - 个股详情公共入口（已实现）：源码扩展通过 `@/extensions/stockPreview` 的 `openStockPreview` / `closeStockPreview` 调用；运行时页面通过 `ctx.ui` 调用相同能力。复用原弹窗、查询和列表切股，不要求每个扩展自行挂载图表。
 - 自定义仓位策略（`PositionSizingPolicy`，已实现）：`data/user_data/position_policies/*.py`，在「设置 → 定义 → 仓位策略」创建（表单 META + 只写一个 `def compute(ctx)` 函数，模板起步）。契约见 `app/backtest/position_sizing.py`：ctx 只含当日及以前信息（候选评分/近 60 日收益/已平仓快照/组合状态/参数），输出 weights + budget_scale，引擎侧单仓上限/现金/敞口钳制不变。保存/备份导入均过「AST 安全校验 → 结构解析 → 合成冒烟」三关；回测在「买入权重 → 自定义策略」选用，引用失效 400 拒绝、运行期异常当日回退等权并计入统计。
@@ -126,6 +127,11 @@ export default extension
 
 ```text
 layout.navigation.extra
+layout.header.quick
+settings.system.section
+settings.data-sources.toolbar
+settings.data-sources.detail-actions
+stock-preview.tabs
 stock-preview.footer
 watchlist.toolbar
 ```
@@ -133,10 +139,31 @@ watchlist.toolbar
 各插槽 context 契约（均要求 `apiVersion: 1`，定义见 `frontend/src/extensions/types.ts` 的 `FrontendSlotContextMap`）：
 
 - `layout.navigation.extra`：`{ collapsed, pathname }`，侧边栏导航底部。
+- `stock-preview.tabs` 在个股详情顶部「日 K / 分时」右侧追加标签。组件接收当前证券的 `{ symbol: string, name: string | null }`。选中时挂载，离开时卸载。弹窗内切股会保留当前标签，并为新证券重新挂载组件。重新打开弹窗默认显示日 K。
 - `stock-preview.footer`：`{ symbol, name, view }`，个股详情对话框底部（日K/分时图表下方）；`view` 为 `'daily' | 'intraday'`。适合个股附加面板：龙虎榜、资金流、外部研究链接等。
 - `watchlist.toolbar`：`{ symbols, viewMode, selectedGroup, refresh }`，自选页工具栏末尾；`symbols` 为当前筛选视图中的标的，`refresh` 在扩展修改数据后调用以刷新自选增强数据。适合批量操作入口：自定义分析、导出、组合计算等。
+- `layout.header.quick`：无 context，侧栏头部「数据源 / AI 配置」行下方的快捷入口行，与核心数据入口 chip 同排（每行两个半宽 chip，行内自带顶部发丝线）。适合注册全局快捷方式。
+- `settings.system.section`：无 context，「设置 → 系统」界面设置区尾部追加系统级设置行；样式应与核心设置行同款。
+- `settings.data-sources.toolbar`：`{ refresh, selectSource }`，数据源页头部工具栏右侧；`refresh` 刷新数据源清单，`selectSource(name)` 选中数据源并打开其详情。适合「安装 / 管理外部数据源包」类入口，完整契约见 [外部数据源插件安装](external-data-source-packages.md)。
+- `settings.data-sources.detail-actions`：`{ plugin, refresh }`，数据源插件详情页头部与主体配置区之间；`plugin` 为当前插件信息，`refresh` 在扩展修改后刷新。完整契约见 [外部数据源插件安装](external-data-source-packages.md)。
 
 新增插槽前必须有真实用例，并同时定义 context 类型、异常隔离和测试；不能只在类型表中预留名字。
+
+#### 给个股详情添加一个标签
+
+在源码扩展 `frontend/src/custom/<namespace>/extension.tsx` 的 `slots` 数组加入以下注册项，把 `StockResearchTab` 换成自己的 React 组件。也可以将[完整示例](../frontend/src/custom/_template/extension.tsx.example)复制到该路径，重新构建前端后点击「个股研究」查看当前证券的代码和简称。
+
+```tsx
+{
+  name: 'stock-preview.tabs',
+  id: 'company-stock-research',
+  label: '个股研究',
+  order: 100,
+  component: StockResearchTab,
+}
+```
+
+`label` 是必填的非空标题，`id` 在本插槽内唯一。多个扩展标签按 `order` 升序排列（默认 100），同序按 `id` 排列。日期范围、分时周期、图表刷新和 `stock-preview.footer` 仅在内置图表视图显示。
 
 ### 3.3 当前路由与导航契约
 
@@ -162,6 +189,10 @@ const extension: FrontendExtension = {
 ```
 
 路由注册与菜单注册已经解耦：页面可以存在但不显示在菜单中；菜单只能引用同一扩展内的已注册路由。首版只支持静态绝对路径。扩展路由不得覆盖核心或其他扩展路径，冲突时只禁用该扩展并输出明确错误。
+
+用户可在「设置 → 页面管理 → 菜单与页面」将内置、分析及扩展导航归入一级分类，扩展清单仍沿用上面的 v1 契约，无需声明 `parentId` 或修改路由。宿主用实际路由路径作为页面 ID（声明式分析页统一为 `/analysis/<id>`），显示名称和图标仍来自原注册项。
+
+布局持久化字段为 `preferences.nav_layout`：`{v: 1, items: [...]}`，顶层项为 `{type: 'page', id: '/path'}` 或 `{type: 'group', id: 'group:<id>', label, children: [{type: 'page', id: '/path'}]}`。分类不能嵌套，看板固定在顶层首位，同一页面不能重复；保存接口为 `PUT /api/settings/preferences/nav-layout`，提交 `nav_layout` 和可选的 `nav_hidden`。归属、顺序与隐藏项统一原子保存，并同步平铺 `nav_order` 供旧版本回退；更高布局版本拒绝覆盖。无新布局时兼容原有 `nav_order`、`nav_hidden` 和分析页裸 ID。暂时不可用的页面引用保留在配置中，侧栏只显示已注册且可见的页面；新建的空分类保留显示，包含页面但其全部隐藏或不可用的分类暂不显示。
 
 完整前端模板位于 [`frontend/src/custom/_template/extension.tsx.example`](../frontend/src/custom/_template/extension.tsx.example)。
 
@@ -283,6 +314,36 @@ def setup(registrar: BackendExtensionRegistrar) -> None:
 - 行为需要按资产类型或运行上下文选择。
 - 扩展只需要装饰默认结果，而不是完全替换算法。
 - 依赖缓存、仓库或通知服务，需要通过明确构造参数注入。
+
+### 4.5 复用核心 AI 工具调用
+
+其他扩展通过已有公共函数调用 AI 工具循环，不需要启用 AI 助手扩展：
+
+```python
+from app.services.ai_provider import generate_ai_text_with_tools, supports_ai_tools
+
+async def execute_tool(name: str, args: dict) -> dict:
+    # 调用方负责校验参数、限制可用工具及处理权限和动作确认。
+    if name != "lookup_local_status":
+        return {"ok": False, "error": "未知工具"}
+    return {"ok": True, "result": {"status": "ready"}}
+
+async def query_status() -> list[dict]:
+    if not supports_ai_tools():
+        raise RuntimeError("当前 AI 接入不支持工具调用")
+    return await generate_ai_text_with_tools(
+        [{"role": "user", "content": "查询本地状态"}],
+        [{"type": "function", "function": {
+            "name": "lookup_local_status",
+            "description": "读取扩展的本地状态",
+            "parameters": {"type": "object", "properties": {}},
+        }}],
+        execute_tool=execute_tool,
+        max_rounds=4,
+    )
+```
+
+返回值为完整消息列表，保留 `assistant.tool_calls`、`tool_call_id` 与工具返回值；最后一条消息不保证是正文（轮次预算用尽时可能停在工具结果），调用方须检查是否得到最终答案。`supports_ai_tools` 只描述当前适配器的协议能力，模型或 CLI 不兼容时仍会明确报错。工具实际执行始终交给注入的回调；该接口不会替扩展授权动作，也不会自动发布策略或把无效工具响应当成成功。
 
 ## 5. 直接修改源码
 
@@ -417,7 +478,7 @@ python3 scripts/upgrade_check.py <目标Tag或分支>
 
 ### 8.1 安装包升级保护（非 Git 用户）
 
-桌面安装包与 Docker 镜像的发布携带全量程序文件清单（`app/upgrade_manifest.json`，构建时生成）。后端每次启动会扫描程序目录并与清单对比，把用户「修改/新增」的程序文件常备备份到 `data/upgrade_guard/live/`——`data/` 不随升级覆盖，因此升级不会丢失这些文件。
+桌面安装包与 Docker 镜像的发布携带全量程序文件清单（`app/upgrade_manifest.json`，构建时生成）。后端每次启动会扫描程序目录并与清单对比，把用户「修改/新增」的程序文件备份到 `data/upgrade_guard/snapshots/`。**自动快照只保留最近一次成功备份**：先完整写入新副本，再原子更新状态指向新副本，最后删除旧副本。复制、报告生成或状态写入失败时保留上一份完整备份，不推进版本记录，可修复问题后重新扫描。旧版 `live/` 目录会在首次成功备份后迁入此机制。
 
 检测到版本变化（上次运行版本 ≠ 当前版本）时生成升级对比报告，在「设置 → 系统设置 → 升级保护」展示：
 
@@ -427,6 +488,8 @@ python3 scripts/upgrade_check.py <目标Tag或分支>
 - **新增文件可恢复**：用户新建的文件新版没有（如更换 Docker 镜像）。
 
 守卫不自动合并代码（自动改写程序文件风险不可控）。修改程序文件后重启或点「重新扫描」即可刷新常备备份；源码运行（无清单）时功能自动停用，Git 工作流仍以 `upgrade_check.py` 预检为准。
+
+升级报告及其文件归档也只保留最近一份，新报告和快照成功提交后清理更早的自动归档；普通重扫或点击「知道了」不会删除最近一份升级归档。中断写入遗留的自动副本会在下一次成功扫描后清理，清理失败时接口会报错并保留已提交的完整快照，之后可重扫。此保留策略仅作用于 `data/upgrade_guard/`，不清理手动导出的配置 ZIP 或其他备份目录。
 
 ## 9. 完成检查表
 

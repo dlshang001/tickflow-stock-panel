@@ -53,7 +53,7 @@ def test_capacity_trim_keeps_newest(tmp_path: Path) -> None:
     assert items[0]["id"] == f"backtest:t{task_registry.MAX_ITEMS + 4}"
 
 
-def test_orphan_running_pruned_on_read(tmp_path: Path) -> None:
+def test_orphan_running_pruned_on_read(tmp_path: Path, monkeypatch) -> None:
     import json
 
     task_registry.upsert(tmp_path, "backtest:old", kind="backtest", status="running")
@@ -62,6 +62,8 @@ def test_orphan_running_pruned_on_read(tmp_path: Path) -> None:
     doc = json.loads(p.read_text(encoding="utf-8"))
     doc["items"][0]["updated_at"] = time.time() - (task_registry.ORPHAN_RUNNING_SECONDS + 3600)
     p.write_text(json.dumps(doc), encoding="utf-8")
+    monkeypatch.setattr(task_registry, "_cache", None)
+    monkeypatch.setattr(task_registry, "_cache_sig", None)
 
     items = task_registry.list_items(tmp_path)
     assert items == [], "孤儿 running 项应在读取时被回收"

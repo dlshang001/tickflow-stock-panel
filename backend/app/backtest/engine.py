@@ -11,7 +11,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Literal
 
 import numpy as np
@@ -31,6 +31,18 @@ from app.parquet import scan_enriched_parquet
 from app.tickflow.repository import KlineRepository
 
 logger = logging.getLogger(__name__)
+
+
+def history_load_start(engine, start: date, asset_type: str, bars: int, *, minimum_days: int = 120) -> date:
+    """保留既有最小预取范围; 长假或分区稀疏时按真实交易日向前取足。"""
+    fallback = start - timedelta(days=max(minimum_days, int(bars * 1.6)))
+    data_dir = getattr(getattr(getattr(engine, "repo", None), "store", None), "data_dir", None)
+    if bars <= 1 or data_dir is None:
+        return fallback
+    from app.services.mining_preflight import enriched_partition_dates
+
+    dates = enriched_partition_dates(data_dir, asset_type, end=start - timedelta(days=1))
+    return min(fallback, dates[max(0, len(dates) - bars)]) if dates else fallback
 
 
 def _matrix_entry_score(matrix: MarketMatrix, time_id: int, asset_id: int) -> float:
@@ -654,8 +666,9 @@ class BacktestEngine:
             )
             if invalid_ext:
                 raise ValueError(
-                    f"扩展字段不可用于矩阵回测 (需为时序模式的数值扩展字段): "
-                    f"{sorted(invalid_ext)}"
+                    f"扩展字段不可用于矩阵回测 (字段已失效，或不是时序模式的数值字段): "
+                    f"{sorted(invalid_ext)}。请在策略设置中移除或替换相关评分因子、叠加条件；"
+                    "若策略源码直接引用该字段，请同步修改源码，或恢复对应的时序扩展数据。"
                 )
             field_columns = field_columns - ext_wanted
         cache_root = (
@@ -668,7 +681,9 @@ class BacktestEngine:
             if cache_profile is not None
             else frozenset(field_columns)
         )
-        cache_fields = frozenset(cache_fields) - ext_wanted
+        # 缓存档包含其他策略的依赖; 所有扩展列均须留到当前策略的现场注入阶段,
+        # 否则无关策略残留的旧扩展字段也会被当作 parquet 必需列, 拖垮整个共享缓存。
+        cache_fields = frozenset(name for name in cache_fields if not name.startswith("ext_"))
         cache_max_bytes = (
             cache_profile.max_disk_bytes
             if cache_profile is not None
